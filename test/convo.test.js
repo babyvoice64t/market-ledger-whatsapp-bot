@@ -5,6 +5,7 @@ import {
   createConvoStore,
   STEPS,
   parseAmount,
+  parseAmountAndDescription,
   parseSelection,
   formatPartyList,
   CANCEL_WORDS,
@@ -93,6 +94,29 @@ test('formatPartyList: numbered list', () => {
   const out = formatPartyList([{ name: 'Ahmed Traders' }, { name: 'Bilal Store' }]);
   assert.equal(out, '1. Ahmed Traders\n2. Bilal Store');
   assert.equal(formatPartyList([]), '');
+});
+
+test('parseAmountAndDescription: amount + description on next lines', () => {
+  assert.deepEqual(parseAmountAndDescription('5000\nInv#0988 imran ali'), {
+    amount: 5000,
+    description: 'Inv#0988 imran ali',
+  });
+  assert.deepEqual(parseAmountAndDescription('50000'), { amount: 50000, description: '' });
+  assert.deepEqual(parseAmountAndDescription('Rs 12,500.50\nnote here'), {
+    amount: 12500.5,
+    description: 'note here',
+  });
+  assert.deepEqual(parseAmountAndDescription('5000\nline one\nline two'), {
+    amount: 5000,
+    description: 'line one line two',
+  });
+});
+
+test('parseAmountAndDescription: rejects bad amount, same-line mixing', () => {
+  assert.deepEqual(parseAmountAndDescription(''), { amount: null, description: '' });
+  assert.deepEqual(parseAmountAndDescription('abc'), { amount: null, description: '' });
+  assert.deepEqual(parseAmountAndDescription('5000 Inv#0988'), { amount: null, description: '' });
+  assert.deepEqual(parseAmountAndDescription('-500\nnote'), { amount: null, description: '' });
 });
 
 test('CANCEL_WORDS contains cancel variants', () => {

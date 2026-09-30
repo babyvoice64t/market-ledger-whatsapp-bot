@@ -22,7 +22,7 @@ import { Boom } from '@hapi/boom';
 import { v2 as cloudinary } from 'cloudinary';
 import { parseCaption, formatRs, USAGE_TEXT } from './parser.js';
 import { createLedgerClient } from './ledger.js';
-import { createConvoStore, STEPS, parseAmount, parseSelection, formatPartyList, CANCEL_WORDS } from './convo.js';
+import { createConvoStore, STEPS, parseAmountAndDescription, parseSelection, formatPartyList, CANCEL_WORDS } from './convo.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
@@ -101,7 +101,7 @@ app.get('/qr', async (req, res) => {
   res.json({ qr: qrDataUrl, connected: isConnected });
 });
 
-app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, group: GROUP_NAME || null, version: '2.0.0' }));
+app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, group: GROUP_NAME || null, version: '2.1.0' }));
 
 // ─── Helpers ───
 function msgKeyId(key) { return `${key.remoteJid}:${key.id}`; }
@@ -153,10 +153,11 @@ async function uploadMedia(buffer, mimetype, partyName, kind) {
 
 // ─── Core: create the ledger entry (file buffer already in hand) ───
 // media: { kind: 'image'|'pdf', mimetype, filename }
-async function processBill(groupJid, msg, parsed, buffer, media) {
+async function processBill(groupJid, msg, parsed, buffer, media, description) {
   const kind = media?.kind || 'image';
   const mimetype = media?.mimetype || 'image/jpeg';
   const filename = media?.filename || `bill_${Date.now()}.jpg`;
+  const desc = String(description || '').trim() || 'Added via WhatsApp';
   let parties;
   try {
     parties = await ledger.getParties();
@@ -183,7 +184,7 @@ async function processBill(groupJid, msg, parsed, buffer, media) {
         partyId: party.id,
         amount: parsed.amount,
         date: today,
-        description: 'Added via WhatsApp',
+        description: desc,
         photoBuffer: buffer,
         filename,
         mimetype,
@@ -199,13 +200,14 @@ async function processBill(groupJid, msg, parsed, buffer, media) {
         partyId: party.id,
         amount: parsed.amount,
         date: today,
-        description: 'Added via WhatsApp' + (photoUrl ? ` | Photo: ${photoUrl}` : ''),
+        description: desc + (photoUrl ? ` | Photo: ${photoUrl}` : ''),
       });
     }
 
     const balance = await ledger.getBalance(party.id).catch(() => null);
     const title = parsed.type === 'sale' ? '✅ *Sale Recorded*' : '✅ *Receipt Recorded*';
     const lines = [title, `🏪 Party: ${party.name}`, `💰 Amount: ${formatRs(parsed.amount)}`];
+    if (desc !== 'Added via WhatsApp') lines.push(`📝 ${desc}`);
     if (balance !== null) lines.push(`📊 Balance: ${formatRs(balance)}`);
     const caption = lines.join('\n');
     if (kind === 'pdf') {
@@ -437,21 +439,21 @@ async function startBot() {
           convos.setStep(senderKey, STEPS.AMOUNT, { entryType });
           const label = entryType === 'sale' ? '💰 Sales' : '🧾 Receipt';
           console.log(`👉 type chosen: ${entryType}`);
-          await sendText(remoteJid, `✅ ${label}\n\n🔢 Ab *amount* bhejo (misal: 50000):\n\n❌ Cancel ke liye "cancel" likho`, msg);
+          await sendText(remoteJid, `✅ ${label}\n\n🔢 Ab *amount* bhejo, aur chaaho to *neeche* description bhi likh do:\n\n5000\nInv#0988 imran ali\n\n❌ Cancel ke liye "cancel" likho`, msg);
           continue;
         }
 
         if (sess.step === STEPS.AMOUNT) {
-          const amount = parseAmount(text);
+          const { amount, description } = parseAmountAndDescription(text);
           if (amount === null) {
-            await sendText(remoteJid, '❌ Sahi amount bhejo (misal: 50000 ya 12,500).', msg);
+            await sendText(remoteJid, '❌ Pehli line me sahi amount likho (misal: 50000). Description amount ke *neeche* wali line me likho.', msg);
             continue;
           }
           const s = convos.get(senderKey);
           convos.clear(senderKey);
           const parsed = { ok: true, partyName: s.partyName, type: s.entryType, amount };
-          console.log(`👉 amount entered: ${amount} — creating ${s.entryType}`);
-          await processBill(remoteJid, msg, parsed, s.media.buffer, s.media);
+          console.log(`👉 amount entered: ${amount}${description ? ` | desc: ${description.slice(0, 40)}` : ''} — creating ${s.entryType}`);
+          await processBill(remoteJid, msg, parsed, s.media.buffer, s.media, description);
           continue;
         }
 

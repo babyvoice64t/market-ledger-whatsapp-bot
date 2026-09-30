@@ -85,6 +85,27 @@ export function parseAmount(text) {
   return Math.round(v * 100) / 100;
 }
 
+// Strict amount check for the first line: "50000", "50,000", "50000.50",
+// "Rs 50000", "5000/-" are ok; "5000 Inv#0988" is not (that's a description).
+function parseAmountLine(line) {
+  if (!/^\s*(rs\.?\s*)?[\d,]+(\.\d+)?\s*(\/-)?\s*$/i.test(String(line || ''))) return null;
+  return parseAmount(line);
+}
+
+// "5000\nInv#0988 imran ali" -> { amount: 5000, description: "Inv#0988 imran ali" }
+// "50000"                   -> { amount: 50000, description: "" }
+// "abc" / ""                -> { amount: null, description: "" }
+export function parseAmountAndDescription(text) {
+  const lines = String(text || '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (!lines.length) return { amount: null, description: '' };
+  const amount = parseAmountLine(lines[0]);
+  if (amount === null) return { amount: null, description: '' };
+  return { amount, description: lines.slice(1).join(' ').trim() };
+}
+
 // "2" with max 5 -> 2 ; "0"/"9"/"abc" -> null
 export function parseSelection(text, max) {
   const n = parseInt(String(text || '').trim(), 10);

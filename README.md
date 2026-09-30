@@ -10,12 +10,17 @@ and replies with a formatted bill card.
 1. 📸 **Bill ki photo ya PDF bhejo** (caption ki zaroorat nahi)
 2. 🏪 Bot party list bhejega — **number** bhejo (misal: `2`)
 3. 💰 Type select karo — `1` = Sales, `2` = Receipt
-4. 🔢 **Amount** bhejo (misal: `50000`)
+4. 🔢 **Amount** bhejo — chaaho to neeche **description** bhi likh do:
+   ```
+   5000
+   Inv#0988 imran ali
+   ```
 5. ✅ Entry ban gayi — bill card wapas aayega:
    ```
    ✅ *Sale Recorded*
    🏪 Party: Ahmed Traders
    💰 Amount: Rs 50,000
+   📝 Inv#0988 imran ali
    📊 Balance: Rs 30,000
    ```
 
@@ -103,7 +108,7 @@ LEDGER_PASSWORD=dummy GROUP_NAME="Test Group" PORT=3000 npm start
 ## Tests
 
 ```bash
-npm test   # 33 tests: caption parser + ledger API client mocks + convo flow
+npm test   # 35 tests: caption parser + ledger API client mocks + convo flow
 ```
 
 ## Files
