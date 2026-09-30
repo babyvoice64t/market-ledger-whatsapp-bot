@@ -21,6 +21,12 @@ and replies with a formatted bill card.
 
 **`undo`** — akhri 30 min me bot se bani entry delete karne ke liye `undo` likho (koi active session na ho).
 
+**Ek saath kayi bills** — 4-5 photos/PDF ek saath bhej do to koi bill zaya nahi hogi: pehli bill ka flow chalega, baqi **queue** me lag jayengi (#1, #2…) aur ek-ek karke khud hi poochi jayengi. `cancel` = sirf current bill cancel (+ agli queued bill shuru), `cancel all` = sab kuch clear.
+
+**Cloudinary fail ho jaye to:**
+- Sale: bill photo ke baghair sale save nahi hoti (photo lazmi hai) — bot bolega `⏳ Cloudinary ki limit lag gayi — 5-10 min baad dobara bhejo`, entry save **nahi** hogi.
+- Receipt: entry save ho jayegi, lekin bill card me `⚠️ photo upload nahi ho saki` likha aayega taake pata chale.
+
 **Shortcut** — photo/PDF ke caption me `<party> sales|receipt <amount>` likho to entry foran ban jati hai (aaj ki date, duplicate check ke saath).
 
 Kisi bhi step par `cancel` likh do to session khatam. 10 minute me jawab na aaye

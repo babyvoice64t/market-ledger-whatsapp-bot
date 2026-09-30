@@ -101,7 +101,7 @@ app.get('/qr', async (req, res) => {
   res.json({ qr: qrDataUrl, connected: isConnected });
 });
 
-app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, group: GROUP_NAME || null, version: '2.2.0' }));
+app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, group: GROUP_NAME || null, version: '2.3.0' }));
 
 // ─── Helpers ───
 function msgKeyId(key) { return `${key.remoteJid}:${key.id}`; }
@@ -167,6 +167,9 @@ function todayPK() {
 // lastEntries: senderKey -> last bot-created entry (for the "undo" command, 30 min TTL).
 const lastEntries = new Map();
 const UNDO_TTL_MS = 30 * 60 * 1000;
+// senderKey -> bills waiting their turn (one active bill per sender at a time)
+const mediaQueues = new Map();
+const MAX_QUEUE = 10;
 async function processBill(groupJid, msg, parsed, buffer, media, description, entryDate) {
   const kind = media?.kind || 'image';
   const mimetype = media?.mimetype || 'image/jpeg';
@@ -194,6 +197,7 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
 
   try {
     let entryId = null;
+    let photoFailed = false; // receipt: bill photo Cloudinary upload failed (entry still saved)
     if (parsed.type === 'sale') {
       const res = await ledger.createSale({
         partyId: party.id,
@@ -210,6 +214,7 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
       try {
         photoUrl = await uploadMedia(buffer, mimetype, party.name, kind);
       } catch (e) {
+        photoFailed = true;
         console.error('receipt file upload fail:', e.message);
       }
       const res = await ledger.createReceipt({
@@ -226,6 +231,9 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
     const lines = [title, `🏪 Party: ${party.name}`, `💰 Amount: ${formatRs(parsed.amount)}`];
     if (desc !== 'Added via WhatsApp') lines.push(`📝 ${desc}`);
     if (date !== todayPK()) lines.push(`📅 Date: ${date}`);
+    if (photoFailed) {
+      lines.push('⚠️ Bill ki photo upload nahi ho saki (Cloudinary) — entry save ho gayi hai.');
+    }
     if (balance !== null) lines.push(`📊 Balance: ${formatRs(balance)}`);
     const caption = lines.join('\n');
     if (kind === 'pdf') {
@@ -241,7 +249,17 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
     return { ok: true, id: entryId, type: parsed.type, partyName: party.name, amount: parsed.amount };
   } catch (e) {
     console.error('entry failed:', e.message);
-    await sendText(groupJid, `❌ Entry save nahi ho saki: ${e.message}`, msg);
+    const errText = e.message || '';
+    if (/rate limit|too many requests|429/i.test(errText)) {
+      // Cloudinary throttling: sale needs its bill photo, so nothing was saved.
+      await sendText(
+        groupJid,
+        '⏳ *Cloudinary ki limit lag gayi* — photo upload nahi hua, *entry save NAHI hui*.\n5-10 min baad bill dobara bhejo.',
+        msg
+      );
+    } else {
+      await sendText(groupJid, `❌ Entry save nahi ho saki: ${errText}`, msg);
+    }
     return { ok: false };
   }
 }
@@ -419,6 +437,7 @@ async function startBot() {
           );
           const res = await processBill(remoteJid, msg, parsed, s.media.buffer, s.media, s.description, s.entryDate);
           trackLastEntry(senderKey, res);
+          await advanceQueue(); // start the next queued bill, if any
         }
 
         function partyListPrompt(parties) {
@@ -427,9 +446,65 @@ async function startBot() {
           return `🏪 Party select karo — *number* bhejo:\n${formatPartyList(shown)}${extra}\n\n❌ Cancel ke liye "cancel" likho`;
         }
 
+        // ── bill queue: one active bill per sender, the rest wait their turn ──
+        function getBillQueue() {
+          let q = mediaQueues.get(senderKey);
+          if (!q) { q = []; mediaQueues.set(senderKey, q); }
+          return q;
+        }
+
+        // start the flow for one bill: caption shortcut (instant) or step-by-step
+        async function startBillFlow(item) {
+          const parsed = parseCaption(item.caption);
+          convos.clear(senderKey);
+          if (parsed.ok) {
+            // shortcut: "<party> sales|receipt <amount>" caption still works instantly
+            console.log(`📩 bill ${item.kind} in "${subject}": caption="${item.caption.slice(0, 80)}"`);
+            const parties = await needParties();
+            const today = todayPK();
+            const party = parties ? ledger.findParty(parties, parsed.partyName) : null;
+            const dup = party ? await findDuplicate(party.id, parsed.type, parsed.amount, today) : null;
+            if (dup) {
+              // duplicate suspected → ask instead of creating instantly
+              convos.start(senderKey, { buffer: item.buffer, mimetype: item.mimetype, filename: item.filename, kind: item.kind });
+              convos.setStep(senderKey, STEPS.CONFIRM, {
+                partyId: party.id, partyName: party.name, entryType: parsed.type,
+                amount: parsed.amount, description: '', entryDate: today, dup: true,
+              });
+              console.log(`⚠️ duplicate suspected (caption shortcut): ${party.name} ${parsed.amount}`);
+              await sendText(remoteJid, dupPrompt(party.name, parsed.type, parsed.amount, today), msg);
+            } else {
+              const res = await processBill(remoteJid, msg, parsed, item.buffer, item);
+              trackLastEntry(senderKey, res);
+            }
+            return;
+          }
+          // step-by-step flow: ask for the party first
+          const parties = await needParties();
+          if (!parties) { return; }
+          if (!parties.length) {
+            await sendText(remoteJid, `⚠️ Portal me koi party add nahi hai. Pehle portal me party add karo: ${LEDGER_URL}/`, msg);
+            return;
+          }
+          convos.start(senderKey, { buffer: item.buffer, mimetype: item.mimetype, filename: item.filename, kind: item.kind });
+          const label = item.kind === 'pdf' ? 'PDF' : 'Photo';
+          console.log(`📩 bill ${item.kind} in "${subject}" — asking party`);
+          await sendText(remoteJid, `📸 ${label} mil gayi!\n\n${partyListPrompt(parties)}`, msg);
+        }
+
+        // after an entry finishes, start the next queued bill (if any)
+        async function advanceQueue() {
+          if (convos.get(senderKey)) return; // still busy with a bill
+          const q = mediaQueues.get(senderKey);
+          if (!q || !q.length) return;
+          const next = q.shift();
+          if (!q.length) mediaQueues.delete(senderKey);
+          console.log(`📸 starting queued bill (${q.length} left in queue)`);
+          await startBillFlow(next);
+        }
+
         if (media) {
           // ── a bill photo/PDF arrived ──
-          const parsed = parseCaption(media.caption);
           let buffer;
           try {
             buffer = await downloadMediaMessage(msg, 'buffer', {});
@@ -438,40 +513,28 @@ async function startBot() {
             await sendText(remoteJid, '❌ File download nahi ho saki. Dobara bhejo.', msg);
             continue;
           }
-          convos.clear(senderKey);
-          if (parsed.ok) {
-            // shortcut: "<party> sales|receipt <amount>" caption still works instantly
-            console.log(`📩 bill ${media.kind} in "${subject}": caption="${media.caption.slice(0, 80)}"`);
-            const parties = await needParties();
-            const today = todayPK();
-            const party = parties ? ledger.findParty(parties, parsed.partyName) : null;
-            const dup = party ? await findDuplicate(party.id, parsed.type, parsed.amount, today) : null;
-            if (dup) {
-              // duplicate suspected → ask instead of creating instantly
-              convos.start(senderKey, { buffer, mimetype: media.mimetype, filename: media.filename, kind: media.kind });
-              convos.setStep(senderKey, STEPS.CONFIRM, {
-                partyId: party.id, partyName: party.name, entryType: parsed.type,
-                amount: parsed.amount, description: '', entryDate: today, dup: true,
-              });
-              console.log(`⚠️ duplicate suspected (caption shortcut): ${party.name} ${parsed.amount}`);
-              await sendText(remoteJid, dupPrompt(party.name, parsed.type, parsed.amount, today), msg);
-            } else {
-              const res = await processBill(remoteJid, msg, parsed, buffer, media);
-              trackLastEntry(senderKey, res);
-            }
-          } else {
-            // start the step-by-step flow: ask for the party first
-            const parties = await needParties();
-            if (!parties) { continue; }
-            if (!parties.length) {
-              await sendText(remoteJid, `⚠️ Portal me koi party add nahi hai. Pehle portal me party add karo: ${LEDGER_URL}/`, msg);
+          const item = { buffer, mimetype: media.mimetype, filename: media.filename, kind: media.kind, caption: media.caption };
+          if (convos.get(senderKey)) {
+            // busy with another bill → queue this one, it starts automatically later
+            const q = getBillQueue();
+            if (q.length >= MAX_QUEUE) {
+              await sendText(remoteJid, `⚠️ Queue full hai (${MAX_QUEUE} bills). Pehli entries complete hone do, phir bhejo.`, msg);
               continue;
             }
-            convos.start(senderKey, { buffer, mimetype: media.mimetype, filename: media.filename, kind: media.kind });
-            const label = media.kind === 'pdf' ? 'PDF' : 'Photo';
-            console.log(`📩 bill ${media.kind} in "${subject}" — asking party`);
-            await sendText(remoteJid, `📸 ${label} mil gayi!\n\n${partyListPrompt(parties)}`, msg);
+            q.push(item);
+            console.log(`📸 bill queued at #${q.length}`);
+            await sendText(remoteJid, `📸 Bill mil gayi — queue me laga di (#${q.length}).\nPehli wali entry complete hote hi iska poochunga. 👆`, msg);
+            continue;
           }
+          const waiting = mediaQueues.get(senderKey);
+          if (waiting && waiting.length) {
+            // no active session but bills waiting (old session expired) → oldest first
+            waiting.push(item);
+            const next = waiting.shift();
+            await startBillFlow(next);
+            continue;
+          }
+          await startBillFlow(item);
           continue;
         }
 
@@ -500,9 +563,21 @@ async function startBot() {
         if (!sess) continue; // no session → stay silent (old caption-only texts are ignored now)
 
         const low = text.toLowerCase().trim();
+        if (low === 'cancel all' || low === 'cancel queue') {
+          convos.clear(senderKey);
+          mediaQueues.delete(senderKey);
+          await sendText(remoteJid, '❌ Sab cancel ho gaya — queue bhi clear kar di.', msg);
+          continue;
+        }
         if (CANCEL_WORDS.has(low)) {
           convos.clear(senderKey);
-          await sendText(remoteJid, '❌ Cancel ho gaya. Nayi bill ke liye dobara photo/PDF bhejo.', msg);
+          const left = mediaQueues.get(senderKey)?.length || 0;
+          await sendText(
+            remoteJid,
+            left ? `❌ Ye bill cancel ho gayi. Ab queue me lagi agli bill shuru karta hun…` : '❌ Cancel ho gaya. Nayi bill ke liye dobara photo/PDF bhejo.',
+            msg
+          );
+          await advanceQueue();
           continue;
         }
 
