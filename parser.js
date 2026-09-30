@@ -37,5 +37,6 @@ export function formatRs(n) {
 }
 
 export const USAGE_TEXT =
-  'Bill photo ke saath caption likho: "<party name> sales|receipt <amount>"\n' +
-  'Misal: "Ahmed Traders sales 50000"';
+  '📸 Bill ki *photo ya PDF* bhejo — phir main khud poochhunga:\n' +
+  '1️⃣ Party ka number\n2️⃣ Sales ya Receipt\n3️⃣ Amount\n\n' +
+  'Shortcut: photo ke saath caption "<party name> sales|receipt <amount>" bhi chalega.';

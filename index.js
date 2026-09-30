@@ -22,6 +22,7 @@ import { Boom } from '@hapi/boom';
 import { v2 as cloudinary } from 'cloudinary';
 import { parseCaption, formatRs, USAGE_TEXT } from './parser.js';
 import { createLedgerClient } from './ledger.js';
+import { createConvoStore, STEPS, parseAmount, parseSelection, formatPartyList, CANCEL_WORDS } from './convo.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
@@ -53,6 +54,7 @@ function makeSimpleCache(ttlSec = 0) {
 const msgRetryCounterCache = makeSimpleCache();
 const messageStore = new Map();
 const handledIds = new Set(); // processed message ids (dedup across redelivery)
+const convos = createConvoStore(); // step-by-step bill entry sessions, one per sender
 const groupSubjectCache = makeSimpleCache(5 * 60);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -87,7 +89,7 @@ async function poll(){try{const r=await fetch('/qr');const j=await r.json();
 let s='Status: '+(j.connected?'Connected ✅':'Disconnected ❌')+'\\nGroup: ${GROUP_NAME || '(not set)'}';
 document.getElementById('stBox').textContent=s;
 if(j.qr){document.getElementById('qrBox').innerHTML='<img src="'+j.qr+'">'}
-else if(j.connected){document.getElementById('qrBox').innerHTML='<span class="ok">✅ Connected — send a bill photo in the group</span>'}
+else if(j.connected){document.getElementById('qrBox').innerHTML='<span class="ok">✅ Connected — send a bill photo or PDF in the group and follow the steps</span>'}
 else{document.getElementById('qrBox').innerHTML='<span class="wait">Waiting for QR — scan with WhatsApp</span>'}}catch(e){}}
 poll();setInterval(poll,3000);
 </script></body></html>`);
@@ -99,7 +101,7 @@ app.get('/qr', async (req, res) => {
   res.json({ qr: qrDataUrl, connected: isConnected });
 });
 
-app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, group: GROUP_NAME || null }));
+app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, group: GROUP_NAME || null, version: '2.0.0' }));
 
 // ─── Helpers ───
 function msgKeyId(key) { return `${key.remoteJid}:${key.id}`; }
@@ -134,28 +136,27 @@ async function sendText(groupJid, text, quoted) {
   await sock.sendMessage(groupJid, { text }, quoted ? { quoted } : undefined);
 }
 
-// Receipt photos: the /api/receipts endpoint has no photo field, so the bot
-// uploads the image to Cloudinary (folder market-ledger/) itself and appends
-// the URL to the receipt description.
-async function uploadReceiptPhoto(buffer, partyName) {
-  const dataUri = `data:image/jpeg;base64,${buffer.toString('base64')}`;
+// Receipt attachments: the /api/receipts endpoint has no file field, so the bot
+// uploads the bill file to Cloudinary (folder market-ledger/) itself and appends
+// the URL to the receipt description. Works for images and PDFs.
+async function uploadMedia(buffer, mimetype, partyName, kind) {
+  const dataUri = `data:${mimetype || 'application/octet-stream'};base64,${buffer.toString('base64')}`;
   const safe = String(partyName || 'party').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30) || 'party';
+  const prefix = kind === 'pdf' ? 'receiptpdf' : 'receipt';
   const up = await cloudinary.uploader.upload(dataUri, {
     folder: 'market-ledger',
-    public_id: `receipt_${safe}_${Date.now()}`,
-    resource_type: 'image',
+    public_id: `${prefix}_${safe}_${Date.now()}`,
+    resource_type: 'auto',
   });
   return up.secure_url || '';
 }
 
-// ─── Core: bill photo handler ───
-async function handleBillPhoto(groupJid, msg, caption) {
-  const parsed = parseCaption(caption);
-  if (!parsed.ok) {
-    await sendText(groupJid, `❌ Caption samajh nahi aayi.\n${USAGE_TEXT}`, msg);
-    return;
-  }
-
+// ─── Core: create the ledger entry (file buffer already in hand) ───
+// media: { kind: 'image'|'pdf', mimetype, filename }
+async function processBill(groupJid, msg, parsed, buffer, media) {
+  const kind = media?.kind || 'image';
+  const mimetype = media?.mimetype || 'image/jpeg';
+  const filename = media?.filename || `bill_${Date.now()}.jpg`;
   let parties;
   try {
     parties = await ledger.getParties();
@@ -175,15 +176,6 @@ async function handleBillPhoto(groupJid, msg, caption) {
     return;
   }
 
-  let buffer;
-  try {
-    buffer = await downloadMediaMessage(msg, 'buffer', {});
-  } catch (e) {
-    console.error('download fail:', e.message);
-    await sendText(groupJid, '❌ Photo download nahi ho saki. Dobara bhejo.', msg);
-    return;
-  }
-
   const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
   try {
     if (parsed.type === 'sale') {
@@ -193,14 +185,15 @@ async function handleBillPhoto(groupJid, msg, caption) {
         date: today,
         description: 'Added via WhatsApp',
         photoBuffer: buffer,
-        filename: `bill_${Date.now()}.jpg`,
+        filename,
+        mimetype,
       });
     } else {
       let photoUrl = '';
       try {
-        photoUrl = await uploadReceiptPhoto(buffer, party.name);
+        photoUrl = await uploadMedia(buffer, mimetype, party.name, kind);
       } catch (e) {
-        console.error('receipt photo upload fail:', e.message);
+        console.error('receipt file upload fail:', e.message);
       }
       await ledger.createReceipt({
         partyId: party.id,
@@ -214,8 +207,17 @@ async function handleBillPhoto(groupJid, msg, caption) {
     const title = parsed.type === 'sale' ? '✅ *Sale Recorded*' : '✅ *Receipt Recorded*';
     const lines = [title, `🏪 Party: ${party.name}`, `💰 Amount: ${formatRs(parsed.amount)}`];
     if (balance !== null) lines.push(`📊 Balance: ${formatRs(balance)}`);
-    await sock.sendMessage(groupJid, { image: buffer, caption: lines.join('\n') }, { quoted: msg });
-    console.log(`✅ ${parsed.type} recorded: ${party.name} ${parsed.amount}`);
+    const caption = lines.join('\n');
+    if (kind === 'pdf') {
+      await sock.sendMessage(
+        groupJid,
+        { document: buffer, mimetype: 'application/pdf', fileName: filename, caption },
+        { quoted: msg }
+      );
+    } else {
+      await sock.sendMessage(groupJid, { image: buffer, caption }, { quoted: msg });
+    }
+    console.log(`✅ ${parsed.type} recorded: ${party.name} ${parsed.amount} (${kind})`);
   } catch (e) {
     console.error('entry failed:', e.message);
     await sendText(groupJid, `❌ Entry save nahi ho saki: ${e.message}`, msg);
@@ -315,16 +317,147 @@ async function startBot() {
 
         const inner = unwrapMsg(msg.message);
         const img = inner.imageMessage;
-        if (!img) continue; // only bill photos with captions
+        const doc = inner.documentMessage;
+        const text = String(inner.conversation || inner.extendedTextMessage?.text || '').trim();
+        const senderKey = msg.key.participant || msg.pushName || remoteJid;
+
+        // bill media = photo, or a PDF document
+        const docMime = String(doc?.mimetype || '').toLowerCase();
+        const isPdf = !!doc && (docMime === 'application/pdf' || /\.pdf$/i.test(doc.fileName || ''));
+        if (doc && !isPdf) {
+          handledIds.add(msg.key.id);
+          await sendText(remoteJid, '❌ Sirf *photo* ya *PDF* bhejo. Baqi files support nahi hain.', msg);
+          continue;
+        }
+        const media = img
+          ? { kind: 'image', caption: String(img.caption || '').trim(), mimetype: img.mimetype || 'image/jpeg', filename: `bill_${Date.now()}.jpg` }
+          : isPdf
+            ? { kind: 'pdf', caption: String(doc.caption || '').trim(), mimetype: 'application/pdf', filename: doc.fileName || `bill_${Date.now()}.pdf` }
+            : null;
+        if (!media && !text) continue; // nothing we handle here
 
         handledIds.add(msg.key.id);
         if (handledIds.size > 1000) {
           const first = handledIds.values().next().value;
           handledIds.delete(first);
         }
-        const caption = String(img.caption || '').trim();
-        console.log(`📩 bill photo in "${subject}": caption="${caption.slice(0, 80)}"`);
-        await handleBillPhoto(remoteJid, msg, caption);
+
+        // ── helper: fetch parties or bail out with an error message ──
+        async function needParties() {
+          try {
+            return await ledger.getParties();
+          } catch (e) {
+            console.error('getParties fail:', e.message);
+            await sendText(remoteJid, '❌ Portal se connect nahi ho saka. Thodi der baad dobara try karo.', msg);
+            return null;
+          }
+        }
+
+        function partyListPrompt(parties) {
+          const shown = parties.slice(0, 50);
+          const extra = parties.length > 50 ? `\n…aur ${parties.length - 50} parties (pehli 50 dikhayi hain)` : '';
+          return `🏪 Party select karo — *number* bhejo:\n${formatPartyList(shown)}${extra}\n\n❌ Cancel ke liye "cancel" likho`;
+        }
+
+        if (media) {
+          // ── a bill photo/PDF arrived ──
+          const parsed = parseCaption(media.caption);
+          let buffer;
+          try {
+            buffer = await downloadMediaMessage(msg, 'buffer', {});
+          } catch (e) {
+            console.error('download fail:', e.message);
+            await sendText(remoteJid, '❌ File download nahi ho saki. Dobara bhejo.', msg);
+            continue;
+          }
+          convos.clear(senderKey);
+          if (parsed.ok) {
+            // shortcut: "<party> sales|receipt <amount>" caption still works instantly
+            console.log(`📩 bill ${media.kind} in "${subject}": caption="${media.caption.slice(0, 80)}"`);
+            await processBill(remoteJid, msg, parsed, buffer, media);
+          } else {
+            // start the step-by-step flow: ask for the party first
+            const parties = await needParties();
+            if (!parties) { continue; }
+            if (!parties.length) {
+              await sendText(remoteJid, `⚠️ Portal me koi party add nahi hai. Pehle portal me party add karo: ${LEDGER_URL}/`, msg);
+              continue;
+            }
+            convos.start(senderKey, { buffer, mimetype: media.mimetype, filename: media.filename, kind: media.kind });
+            const label = media.kind === 'pdf' ? 'PDF' : 'Photo';
+            console.log(`📩 bill ${media.kind} in "${subject}" — asking party`);
+            await sendText(remoteJid, `📸 ${label} mil gayi!\n\n${partyListPrompt(parties)}`, msg);
+          }
+          continue;
+        }
+
+        // ── a text message arrived: part of an active step-by-step session? ──
+        const sess = convos.get(senderKey);
+        if (!sess) continue; // no session → stay silent (old caption-only texts are ignored now)
+
+        const low = text.toLowerCase().trim();
+        if (CANCEL_WORDS.has(low)) {
+          convos.clear(senderKey);
+          await sendText(remoteJid, '❌ Cancel ho gaya. Nayi bill ke liye dobara photo/PDF bhejo.', msg);
+          continue;
+        }
+
+        if (sess.step === STEPS.PARTY) {
+          // accept a number, or a full old-style caption as a shortcut
+          const shortcut = parseCaption(text);
+          if (shortcut.ok) {
+            const s = convos.get(senderKey);
+            convos.clear(senderKey);
+            console.log(`📩 caption shortcut in "${subject}": "${text.slice(0, 80)}"`);
+            await processBill(remoteJid, msg, shortcut, s.media.buffer, s.media);
+            continue;
+          }
+          const parties = await needParties();
+          if (!parties) { convos.clear(senderKey); continue; }
+          const n = parseSelection(text, Math.min(parties.length, 50));
+          if (!n) {
+            await sendText(remoteJid, `❌ 1 se ${Math.min(parties.length, 50)} tak ka number bhejo.\n\n${partyListPrompt(parties)}`, msg);
+            continue;
+          }
+          const party = parties[n - 1];
+          convos.setStep(senderKey, STEPS.TYPE, { partyId: party.id, partyName: party.name });
+          console.log(`👉 party chosen: ${party.name}`);
+          await sendText(remoteJid, `🏪 Party: *${party.name}*\n\nAb type select karo:\n1. 💰 Sales (bill aaya)\n2. 🧾 Receipt (paisay mile)\n\n❌ Cancel ke liye "cancel" likho`, msg);
+          continue;
+        }
+
+        if (sess.step === STEPS.TYPE) {
+          let entryType = null;
+          if (low === '1' || low === 'sales' || low === 'sale') entryType = 'sale';
+          else if (low === '2' || low === 'receipt' || low === 'receipts') entryType = 'receipt';
+          if (!entryType) {
+            await sendText(remoteJid, '❌ "1" bhejo Sales ke liye, "2" bhejo Receipt ke liye.', msg);
+            continue;
+          }
+          convos.setStep(senderKey, STEPS.AMOUNT, { entryType });
+          const label = entryType === 'sale' ? '💰 Sales' : '🧾 Receipt';
+          console.log(`👉 type chosen: ${entryType}`);
+          await sendText(remoteJid, `✅ ${label}\n\n🔢 Ab *amount* bhejo (misal: 50000):\n\n❌ Cancel ke liye "cancel" likho`, msg);
+          continue;
+        }
+
+        if (sess.step === STEPS.AMOUNT) {
+          const amount = parseAmount(text);
+          if (amount === null) {
+            await sendText(remoteJid, '❌ Sahi amount bhejo (misal: 50000 ya 12,500).', msg);
+            continue;
+          }
+          const s = convos.get(senderKey);
+          convos.clear(senderKey);
+          const parsed = { ok: true, partyName: s.partyName, type: s.entryType, amount };
+          console.log(`👉 amount entered: ${amount} — creating ${s.entryType}`);
+          await processBill(remoteJid, msg, parsed, s.media.buffer, s.media);
+          continue;
+        }
+
+        // unknown step (shouldn't happen) → reset
+        convos.clear(senderKey);
+        // 'empty' → no photo was waiting: ignore (existing behavior)
       } catch (e) {
         console.error('message handler error:', e.message);
       }

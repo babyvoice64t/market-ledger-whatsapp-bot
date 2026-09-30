@@ -1,10 +1,30 @@
 # Market Ledger WhatsApp Bot
 
-Watches a WhatsApp **group** for bill photos. Send a bill photo with a caption and the
-bot creates the entry in the [Market Ledger Vault](https://market-ledger-vault.pages.dev)
+Watches a WhatsApp **group** for bill photos/PDFs. Send a bill photo or PDF and the
+bot walks you through 3 quick steps — party, type (Sales/Receipt), amount — then
+creates the entry in the [Market Ledger Vault](https://market-ledger-vault.pages.dev)
 and replies with a formatted bill card.
 
-## Caption format
+## How it works (step-by-step)
+
+1. 📸 **Bill ki photo ya PDF bhejo** (caption ki zaroorat nahi)
+2. 🏪 Bot party list bhejega — **number** bhejo (misal: `2`)
+3. 💰 Type select karo — `1` = Sales, `2` = Receipt
+4. 🔢 **Amount** bhejo (misal: `50000`)
+5. ✅ Entry ban gayi — bill card wapas aayega:
+   ```
+   ✅ *Sale Recorded*
+   🏪 Party: Ahmed Traders
+   💰 Amount: Rs 50,000
+   📊 Balance: Rs 30,000
+   ```
+
+Kisi bhi step par `cancel` likh do to session khatam. 10 minute me jawab na aaye
+to session expire ho jati hai — photo/PDF dobara bhejo.
+
+## Shortcut (caption format)
+
+Photo ke **saath hi caption** likh do to steps skip ho jate hain:
 
 ```
 <party name> <sales|receipt> <amount>
@@ -62,7 +82,8 @@ Rules:
 1. WhatsApp par group banao (misal naam: `Market Ledger`).
 2. Jis number se bot linked hai usay group me add karo.
 3. `GROUP_NAME` env me **wahi exact naam** likho jo group ka subject hai.
-4. Bill ki photo **caption ke saath** bhejo: `Ahmed Traders sales 50000`.
+4. Bill ki **photo ya PDF bhejo** aur bot ke 3 steps follow karo
+   (party number → type → amount).
 
 ## Keep-alive
 
@@ -82,14 +103,15 @@ LEDGER_PASSWORD=dummy GROUP_NAME="Test Group" PORT=3000 npm start
 ## Tests
 
 ```bash
-npm test   # 23 tests: caption parser (15) + ledger API client mocks (8)
+npm test   # 33 tests: caption parser + ledger API client mocks + convo flow
 ```
 
 ## Files
 
-- `index.js` — Baileys socket, group watcher, bill handler, Express dashboard (`/`, `/qr`, `/health`)
+- `index.js` — Baileys socket, group watcher, step-by-step bill flow, Express dashboard (`/`, `/qr`, `/health`)
+- `convo.js` — conversation sessions (per-sender, 10-min TTL) + `parseAmount`/`parseSelection`/`formatPartyList` (unit-tested)
 - `parser.js` — caption parser + `formatRs` (unit-tested)
 - `ledger.js` — Market Ledger API client: login/token cache, parties lookup, sale/receipt create, balance (mock-tested, no real writes)
-- `test/` — `parser.test.js`, `ledger.test.js`
+- `test/` — `parser.test.js`, `ledger.test.js`, `convo.test.js`
 - `render.yaml` — Render Blueprint
 - `.gitignore` — node_modules, auth_info (WhatsApp session), .env

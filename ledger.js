@@ -61,8 +61,8 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch }) {
     return j.totals && typeof j.totals.balance === 'number' ? j.totals.balance : 0;
   }
 
-  // Sales need the bill photo (backend uploads it to Cloudinary).
-  async function createSale({ partyId, amount, date, description, photoBuffer, filename }) {
+  // Sales need the bill file (backend uploads it to Cloudinary).
+  async function createSale({ partyId, amount, date, description, photoBuffer, filename, mimetype }) {
     const t = await ensureToken();
     const form = new FormData();
     form.append('password', t);
@@ -70,7 +70,7 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch }) {
     form.append('amount', String(amount));
     form.append('date', date);
     if (description) form.append('description', description);
-    form.append('photo', new Blob([photoBuffer], { type: 'image/jpeg' }), filename || 'bill.jpg');
+    form.append('photo', new Blob([photoBuffer], { type: mimetype || 'image/jpeg' }), filename || 'bill.jpg');
     const r = await fetchImpl(`${base}/api/sales`, { method: 'POST', body: form });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) throw new Error(j.error || 'sale request failed');
