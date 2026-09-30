@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: market-ledger-whatsapp-bot
+    env: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: LEDGER_URL
+        value: https://market-ledger-vault.pages.dev
+      - key: LEDGER_PASSWORD
+        sync: false  # Render dashboard me set karo (portal ka shared password)
+      - key: GROUP_NAME
+        sync: false  # WhatsApp group ka exact naam (subject) — misal: Market Ledger
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
