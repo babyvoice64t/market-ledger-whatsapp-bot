@@ -151,3 +151,40 @@ test('login failure throws', async () => {
   const c = createLedgerClient({ baseUrl: 'https://x.test', password: 'wrong', fetchImpl: f });
   await assert.rejects(() => c.ensureToken(), /ledger login failed/);
 });
+
+test('getRecentEntries hits /api/entries/recent with party_id and minutes', async () => {
+  const entries = [{ type: 'sale', id: 7, amount: 5000, description: 'Inv#1', date: '2026-10-01', created_at: '2026-10-01T10:00:00.000Z' }];
+  const f = mockFetch([
+    { match: isLogin, ...LOGIN },
+    {
+      match: (url) => url.includes('/api/entries/recent'),
+      status: 200, json: { entries },
+    },
+  ]);
+  const c = createLedgerClient({ baseUrl: 'https://x.test', password: 'dummy', fetchImpl: f });
+  const out = await c.getRecentEntries(3, 180);
+  assert.deepEqual(out, entries);
+  const call = f.calls.find((x) => x.url.includes('/api/entries/recent'));
+  assert.ok(call.url.includes('party_id=3'));
+  assert.ok(call.url.includes('minutes=180'));
+});
+
+test('deleteEntry sends DELETE to /api/sales/:id and /api/receipts/:id', async () => {
+  const f = mockFetch([
+    { match: isLogin, ...LOGIN },
+    { match: (url, opts) => url.includes('/api/sales/9') && opts.method === 'DELETE', status: 200, json: { ok: true } },
+    { match: (url, opts) => url.includes('/api/receipts/4') && opts.method === 'DELETE', status: 200, json: { ok: true } },
+  ]);
+  const c = createLedgerClient({ baseUrl: 'https://x.test', password: 'dummy', fetchImpl: f });
+  assert.deepEqual(await c.deleteEntry('sale', 9), { ok: true });
+  assert.deepEqual(await c.deleteEntry('receipt', 4), { ok: true });
+});
+
+test('deleteEntry throws on missing entry', async () => {
+  const f = mockFetch([
+    { match: isLogin, ...LOGIN },
+    { match: (url) => url.includes('/api/sales/999'), status: 404, json: { error: 'Sale not found' } },
+  ]);
+  const c = createLedgerClient({ baseUrl: 'https://x.test', password: 'dummy', fetchImpl: f });
+  await assert.rejects(() => c.deleteEntry('sale', 999), /Sale not found/);
+});

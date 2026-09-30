@@ -89,6 +89,34 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch }) {
     return j;
   }
 
+  // Entries created in the last `minutes` for a party (for duplicate detection).
+  // -> [{type:'sale'|'receipt', id, amount, description, date, created_at}]
+  async function getRecentEntries(partyId, minutes = 120) {
+    const r = await authedGet(
+      `/api/entries/recent?party_id=${encodeURIComponent(partyId)}&minutes=${encodeURIComponent(minutes)}`
+    );
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || 'recent entries request failed');
+    return j.entries || [];
+  }
+
+  async function deleteEntry(entryType, id) {
+    const t = await ensureToken();
+    const path = entryType === 'sale' ? `/api/sales/${id}` : `/api/receipts/${id}`;
+    const r = await fetchImpl(withToken(path, t), { method: 'DELETE' });
+    if (r.status === 401) {
+      token = null;
+      const t2 = await ensureToken();
+      const r2 = await fetchImpl(withToken(path, t2), { method: 'DELETE' });
+      const j2 = await r2.json().catch(() => ({}));
+      if (!r2.ok || !j2.ok) throw new Error(j2.error || 'delete request failed');
+      return j2;
+    }
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) throw new Error(j.error || 'delete request failed');
+    return j;
+  }
+
   return {
     login,
     ensureToken,
@@ -97,5 +125,7 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch }) {
     getBalance,
     createSale,
     createReceipt,
+    getRecentEntries,
+    deleteEntry,
   };
 }

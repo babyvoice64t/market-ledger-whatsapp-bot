@@ -15,14 +15,13 @@ and replies with a formatted bill card.
    5000
    Inv#0988 imran ali
    ```
-5. ✅ Entry ban gayi — bill card wapas aayega:
-   ```
-   ✅ *Sale Recorded*
-   🏪 Party: Ahmed Traders
-   💰 Amount: Rs 50,000
-   📝 Inv#0988 imran ali
-   📊 Balance: Rs 30,000
-   ```
+5. 📅 **Bill ki date** bhejo — aaj ki hai to `aaj` likho, kal ki to `kal`, warna date (misal: `28-09-2026`)
+6. ⚠️ Agar same party/type/amount/date ki entry akhri 3 ghante me ho chuki ho to bot poochega — *haan* likho phir bhi save karne ke liye, *nahi* likho cancel ke liye
+7. ✅ Entry ban gayi — bill card wapas aayega (backdate ho to 📅 date bhi dikhegi)
+
+**`undo`** — akhri 30 min me bot se bani entry delete karne ke liye `undo` likho (koi active session na ho).
+
+**Shortcut** — photo/PDF ke caption me `<party> sales|receipt <amount>` likho to entry foran ban jati hai (aaj ki date, duplicate check ke saath).
 
 Kisi bhi step par `cancel` likh do to session khatam. 10 minute me jawab na aaye
 to session expire ho jati hai — photo/PDF dobara bhejo.
@@ -108,7 +107,7 @@ LEDGER_PASSWORD=dummy GROUP_NAME="Test Group" PORT=3000 npm start
 ## Tests
 
 ```bash
-npm test   # 35 tests: caption parser + ledger API client mocks + convo flow
+npm test   # 41 tests: caption parser + ledger API client mocks + convo flow + date parser
 ```
 
 ## Files

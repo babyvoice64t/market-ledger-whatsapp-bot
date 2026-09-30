@@ -6,6 +6,7 @@ import {
   STEPS,
   parseAmount,
   parseAmountAndDescription,
+  parseDateInput,
   parseSelection,
   formatPartyList,
   CANCEL_WORDS,
@@ -117,6 +118,34 @@ test('parseAmountAndDescription: rejects bad amount, same-line mixing', () => {
   assert.deepEqual(parseAmountAndDescription('abc'), { amount: null, description: '' });
   assert.deepEqual(parseAmountAndDescription('5000 Inv#0988'), { amount: null, description: '' });
   assert.deepEqual(parseAmountAndDescription('-500\nnote'), { amount: null, description: '' });
+});
+
+test('parseDateInput: aaj/kal/formats', () => {
+  assert.equal(parseDateInput('aaj', '2026-10-01'), '2026-10-01');
+  assert.equal(parseDateInput('AAJ', '2026-10-01'), '2026-10-01');
+  assert.equal(parseDateInput('today', '2026-10-01'), '2026-10-01');
+  assert.equal(parseDateInput('kal', '2026-10-01'), '2026-09-30');
+  assert.equal(parseDateInput('yesterday', '2026-10-01'), '2026-09-30');
+  assert.equal(parseDateInput('kal', '2026-03-01'), '2026-02-28'); // month boundary
+  assert.equal(parseDateInput('2026-09-28', '2026-10-01'), '2026-09-28');
+  assert.equal(parseDateInput('28-09-2026', '2026-10-01'), '2026-09-28');
+  assert.equal(parseDateInput('28/09/2026', '2026-10-01'), '2026-09-28');
+  assert.equal(parseDateInput('1-9-2026', '2026-10-01'), '2026-09-01');
+});
+
+test('parseDateInput: rejects invalid and future dates', () => {
+  assert.equal(parseDateInput('', '2026-10-01'), null);
+  assert.equal(parseDateInput('abc', '2026-10-01'), null);
+  assert.equal(parseDateInput('31-02-2026', '2026-10-01'), null); // not a real date
+  assert.equal(parseDateInput('2026-13-01', '2026-10-01'), null);
+  assert.equal(parseDateInput('2026-10-05', '2026-10-01'), null); // future
+  assert.equal(parseDateInput('05-10-2026', '2026-10-01'), null); // future
+  assert.equal(parseDateInput('aaj', 'not-a-date'), null);
+});
+
+test('STEPS has date and confirm steps', () => {
+  assert.equal(STEPS.DATE, 'date');
+  assert.equal(STEPS.CONFIRM, 'confirm');
 });
 
 test('CANCEL_WORDS contains cancel variants', () => {

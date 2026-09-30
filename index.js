@@ -22,7 +22,7 @@ import { Boom } from '@hapi/boom';
 import { v2 as cloudinary } from 'cloudinary';
 import { parseCaption, formatRs, USAGE_TEXT } from './parser.js';
 import { createLedgerClient } from './ledger.js';
-import { createConvoStore, STEPS, parseAmountAndDescription, parseSelection, formatPartyList, CANCEL_WORDS } from './convo.js';
+import { createConvoStore, STEPS, parseAmountAndDescription, parseSelection, parseDateInput, formatPartyList, CANCEL_WORDS } from './convo.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
@@ -101,7 +101,7 @@ app.get('/qr', async (req, res) => {
   res.json({ qr: qrDataUrl, connected: isConnected });
 });
 
-app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, group: GROUP_NAME || null, version: '2.1.0' }));
+app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, group: GROUP_NAME || null, version: '2.2.0' }));
 
 // ─── Helpers ───
 function msgKeyId(key) { return `${key.remoteJid}:${key.id}`; }
@@ -151,12 +151,27 @@ async function uploadMedia(buffer, mimetype, partyName, kind) {
   return up.secure_url || '';
 }
 
+// Pakistan date (YYYY-MM-DD) — Render runs on UTC, so don't use UTC date directly.
+function todayPK() {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Karachi',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+}
+
 // ─── Core: create the ledger entry (file buffer already in hand) ───
 // media: { kind: 'image'|'pdf', mimetype, filename }
-async function processBill(groupJid, msg, parsed, buffer, media, description) {
+// Returns { ok:true, id, type, partyName, amount } on success, { ok:false } otherwise.
+// lastEntries: senderKey -> last bot-created entry (for the "undo" command, 30 min TTL).
+const lastEntries = new Map();
+const UNDO_TTL_MS = 30 * 60 * 1000;
+async function processBill(groupJid, msg, parsed, buffer, media, description, entryDate) {
   const kind = media?.kind || 'image';
   const mimetype = media?.mimetype || 'image/jpeg';
   const filename = media?.filename || `bill_${Date.now()}.jpg`;
+  const date = entryDate || todayPK();
   const desc = String(description || '').trim() || 'Added via WhatsApp';
   let parties;
   try {
@@ -164,7 +179,7 @@ async function processBill(groupJid, msg, parsed, buffer, media, description) {
   } catch (e) {
     console.error('getParties fail:', e.message);
     await sendText(groupJid, '❌ Portal se connect nahi ho saka. Thodi der baad dobara bhejo.', msg);
-    return;
+    return { ok: false };
   }
 
   const party = ledger.findParty(parties, parsed.partyName);
@@ -174,21 +189,22 @@ async function processBill(groupJid, msg, parsed, buffer, media, description) {
       `⚠️ Party "*${parsed.partyName}*" portal me add nahi hai. Pehle portal me add karo: ${LEDGER_URL}/`,
       msg
     );
-    return;
+    return { ok: false };
   }
 
-  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
   try {
+    let entryId = null;
     if (parsed.type === 'sale') {
-      await ledger.createSale({
+      const res = await ledger.createSale({
         partyId: party.id,
         amount: parsed.amount,
-        date: today,
+        date,
         description: desc,
         photoBuffer: buffer,
         filename,
         mimetype,
       });
+      entryId = res && res.id != null ? res.id : null;
     } else {
       let photoUrl = '';
       try {
@@ -196,18 +212,20 @@ async function processBill(groupJid, msg, parsed, buffer, media, description) {
       } catch (e) {
         console.error('receipt file upload fail:', e.message);
       }
-      await ledger.createReceipt({
+      const res = await ledger.createReceipt({
         partyId: party.id,
         amount: parsed.amount,
-        date: today,
+        date,
         description: desc + (photoUrl ? ` | Photo: ${photoUrl}` : ''),
       });
+      entryId = res && res.id != null ? res.id : null;
     }
 
     const balance = await ledger.getBalance(party.id).catch(() => null);
     const title = parsed.type === 'sale' ? '✅ *Sale Recorded*' : '✅ *Receipt Recorded*';
     const lines = [title, `🏪 Party: ${party.name}`, `💰 Amount: ${formatRs(parsed.amount)}`];
     if (desc !== 'Added via WhatsApp') lines.push(`📝 ${desc}`);
+    if (date !== todayPK()) lines.push(`📅 Date: ${date}`);
     if (balance !== null) lines.push(`📊 Balance: ${formatRs(balance)}`);
     const caption = lines.join('\n');
     if (kind === 'pdf') {
@@ -219,10 +237,19 @@ async function processBill(groupJid, msg, parsed, buffer, media, description) {
     } else {
       await sock.sendMessage(groupJid, { image: buffer, caption }, { quoted: msg });
     }
-    console.log(`✅ ${parsed.type} recorded: ${party.name} ${parsed.amount} (${kind})`);
+    console.log(`✅ ${parsed.type} recorded: ${party.name} ${parsed.amount} (${kind}) date=${date} id=${entryId}`);
+    return { ok: true, id: entryId, type: parsed.type, partyName: party.name, amount: parsed.amount };
   } catch (e) {
     console.error('entry failed:', e.message);
     await sendText(groupJid, `❌ Entry save nahi ho saki: ${e.message}`, msg);
+    return { ok: false };
+  }
+}
+
+// Remember a bot-created entry so "undo" can delete it (30 min window).
+function trackLastEntry(senderKey, res) {
+  if (res && res.ok && res.id != null) {
+    lastEntries.set(senderKey, { ...res, at: Date.now() });
   }
 }
 
@@ -355,6 +382,45 @@ async function startBot() {
           }
         }
 
+        // ── helper: duplicate detection (same party + type + amount + date, last 3h) ──
+        async function findDuplicate(partyId, entryType, amount, entryDate) {
+          try {
+            const recent = await ledger.getRecentEntries(partyId, 180);
+            return (
+              recent.find(
+                (e) =>
+                  e.type === entryType &&
+                  Math.abs(Number(e.amount) - amount) < 0.005 &&
+                  String(e.date || '') === entryDate
+              ) || null
+            );
+          } catch (e) {
+            console.error('dup check fail:', e.message);
+            return null; // never block entry creation on a failed check
+          }
+        }
+
+        function dupPrompt(partyName, entryType, amount, entryDate) {
+          const typeLabel = entryType === 'sale' ? '💰 Sales' : '🧾 Receipt';
+          return (
+            `⚠️ *Lagta hai ye entry pehle ho chuki hai:*\n` +
+            `🏪 Party: ${partyName}\n${typeLabel}: ${formatRs(amount)}\n📅 Date: ${entryDate}\n\n` +
+            `Phir bhi save karun? *haan* ya *nahi* likho`
+          );
+        }
+
+        // ── helper: create the entry from a finished session and track it for undo ──
+        async function finalizeEntry(s) {
+          convos.clear(senderKey);
+          const parsed = { ok: true, partyName: s.partyName, type: s.entryType, amount: s.amount };
+          console.log(
+            `👉 creating ${s.entryType}: ${s.partyName} ${s.amount} date=${s.entryDate}` +
+              (s.description ? ` desc=${s.description.slice(0, 40)}` : '')
+          );
+          const res = await processBill(remoteJid, msg, parsed, s.media.buffer, s.media, s.description, s.entryDate);
+          trackLastEntry(senderKey, res);
+        }
+
         function partyListPrompt(parties) {
           const shown = parties.slice(0, 50);
           const extra = parties.length > 50 ? `\n…aur ${parties.length - 50} parties (pehli 50 dikhayi hain)` : '';
@@ -376,7 +442,23 @@ async function startBot() {
           if (parsed.ok) {
             // shortcut: "<party> sales|receipt <amount>" caption still works instantly
             console.log(`📩 bill ${media.kind} in "${subject}": caption="${media.caption.slice(0, 80)}"`);
-            await processBill(remoteJid, msg, parsed, buffer, media);
+            const parties = await needParties();
+            const today = todayPK();
+            const party = parties ? ledger.findParty(parties, parsed.partyName) : null;
+            const dup = party ? await findDuplicate(party.id, parsed.type, parsed.amount, today) : null;
+            if (dup) {
+              // duplicate suspected → ask instead of creating instantly
+              convos.start(senderKey, { buffer, mimetype: media.mimetype, filename: media.filename, kind: media.kind });
+              convos.setStep(senderKey, STEPS.CONFIRM, {
+                partyId: party.id, partyName: party.name, entryType: parsed.type,
+                amount: parsed.amount, description: '', entryDate: today, dup: true,
+              });
+              console.log(`⚠️ duplicate suspected (caption shortcut): ${party.name} ${parsed.amount}`);
+              await sendText(remoteJid, dupPrompt(party.name, parsed.type, parsed.amount, today), msg);
+            } else {
+              const res = await processBill(remoteJid, msg, parsed, buffer, media);
+              trackLastEntry(senderKey, res);
+            }
           } else {
             // start the step-by-step flow: ask for the party first
             const parties = await needParties();
@@ -389,6 +471,26 @@ async function startBot() {
             const label = media.kind === 'pdf' ? 'PDF' : 'Photo';
             console.log(`📩 bill ${media.kind} in "${subject}" — asking party`);
             await sendText(remoteJid, `📸 ${label} mil gayi!\n\n${partyListPrompt(parties)}`, msg);
+          }
+          continue;
+        }
+
+        // ── "undo": delete the last entry this bot created for this sender (30 min window) ──
+        if (['undo', 'undo karo'].includes(text.toLowerCase().trim()) && !convos.get(senderKey)) {
+          const last = lastEntries.get(senderKey);
+          if (!last || Date.now() - last.at > UNDO_TTL_MS) {
+            await sendText(remoteJid, '❓ Undo ke liye koi recent entry nahi mili.\n(Sirf akhri 30 min me bot se bani hui entry undo ho sakti hai.)', msg);
+            continue;
+          }
+          try {
+            await ledger.deleteEntry(last.type, last.id);
+            lastEntries.delete(senderKey);
+            const typeLabel = last.type === 'sale' ? 'Sales' : 'Receipt';
+            await sendText(remoteJid, `🗑️ *Entry delete ho gayi:*\n🏪 ${last.partyName}\n💰 ${formatRs(last.amount)} (${typeLabel})`, msg);
+            console.log(`↩️ undo: deleted ${last.type} #${last.id} (${last.partyName} ${last.amount})`);
+          } catch (e) {
+            console.error('undo fail:', e.message);
+            await sendText(remoteJid, `❌ Delete nahi ho saki: ${e.message}`, msg);
           }
           continue;
         }
@@ -409,9 +511,23 @@ async function startBot() {
           const shortcut = parseCaption(text);
           if (shortcut.ok) {
             const s = convos.get(senderKey);
-            convos.clear(senderKey);
-            console.log(`📩 caption shortcut in "${subject}": "${text.slice(0, 80)}"`);
-            await processBill(remoteJid, msg, shortcut, s.media.buffer, s.media);
+            const parties = await needParties();
+            const today = todayPK();
+            const party = parties ? ledger.findParty(parties, shortcut.partyName) : null;
+            const dup = party ? await findDuplicate(party.id, shortcut.type, shortcut.amount, today) : null;
+            if (dup) {
+              convos.setStep(senderKey, STEPS.CONFIRM, {
+                partyId: party.id, partyName: party.name, entryType: shortcut.type,
+                amount: shortcut.amount, description: '', entryDate: today, dup: true,
+              });
+              console.log(`📩 caption shortcut in "${subject}": "${text.slice(0, 80)}" — duplicate suspected`);
+              await sendText(remoteJid, dupPrompt(party.name, shortcut.type, shortcut.amount, today), msg);
+            } else {
+              convos.clear(senderKey);
+              console.log(`📩 caption shortcut in "${subject}": "${text.slice(0, 80)}"`);
+              const res = await processBill(remoteJid, msg, shortcut, s.media.buffer, s.media);
+              trackLastEntry(senderKey, res);
+            }
             continue;
           }
           const parties = await needParties();
@@ -449,11 +565,48 @@ async function startBot() {
             await sendText(remoteJid, '❌ Pehli line me sahi amount likho (misal: 50000). Description amount ke *neeche* wali line me likho.', msg);
             continue;
           }
+          convos.setStep(senderKey, STEPS.DATE, { amount, description });
+          console.log(`👉 amount entered: ${amount}${description ? ` | desc: ${description.slice(0, 40)}` : ''} — asking date`);
+          await sendText(
+            remoteJid,
+            `✅ Amount: ${formatRs(amount)}${description ? `\n📝 ${description}` : ''}\n\n📅 Bill ki *date* kya hai?\nAaj ki hai to *aaj* likho, warna date bhejo (misal: 28-09-2026):\n\n❌ Cancel ke liye "cancel" likho`,
+            msg
+          );
+          continue;
+        }
+
+        if (sess.step === STEPS.DATE) {
           const s = convos.get(senderKey);
-          convos.clear(senderKey);
-          const parsed = { ok: true, partyName: s.partyName, type: s.entryType, amount };
-          console.log(`👉 amount entered: ${amount}${description ? ` | desc: ${description.slice(0, 40)}` : ''} — creating ${s.entryType}`);
-          await processBill(remoteJid, msg, parsed, s.media.buffer, s.media, description);
+          const entryDate = parseDateInput(text, todayPK());
+          if (!entryDate) {
+            await sendText(remoteJid, '❌ Sahi date likho: *aaj*, *kal*, ya date (misal: 28-09-2026 ya 2026-09-28).', msg);
+            continue;
+          }
+          const dup = await findDuplicate(s.partyId, s.entryType, s.amount, entryDate);
+          if (dup) {
+            convos.setStep(senderKey, STEPS.CONFIRM, { entryDate, dup: true });
+            console.log(`⚠️ duplicate suspected: ${s.partyName} ${s.amount} date=${entryDate}`);
+            await sendText(remoteJid, dupPrompt(s.partyName, s.entryType, s.amount, entryDate), msg);
+            continue;
+          }
+          s.entryDate = entryDate;
+          await finalizeEntry(s);
+          continue;
+        }
+
+        if (sess.step === STEPS.CONFIRM) {
+          const s = convos.get(senderKey);
+          if (['haan', 'ha', 'yes', 'y', '1'].includes(low)) {
+            console.log('👉 duplicate confirmed by user — creating anyway');
+            await finalizeEntry(s);
+            continue;
+          }
+          if (['nahi', 'nahin', 'na', 'no', 'n', '2'].includes(low)) {
+            convos.clear(senderKey);
+            await sendText(remoteJid, '❌ Theek hai, entry save nahi ki.', msg);
+            continue;
+          }
+          await sendText(remoteJid, '❓ *haan* likho save karne ke liye, *nahi* likho cancel ke liye.', msg);
           continue;
         }
 

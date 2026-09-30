@@ -10,6 +10,8 @@ export const STEPS = {
   PARTY: 'party',
   TYPE: 'type',
   AMOUNT: 'amount',
+  DATE: 'date',
+  CONFIRM: 'confirm',
 };
 
 export function createConvoStore(ttlMs = CONVO_TTL_MS) {
@@ -104,6 +106,41 @@ export function parseAmountAndDescription(text) {
   const amount = parseAmountLine(lines[0]);
   if (amount === null) return { amount: null, description: '' };
   return { amount, description: lines.slice(1).join(' ').trim() };
+}
+
+// Parse a bill date from user text. todayISO = 'YYYY-MM-DD' reference (caller's timezone).
+// Accepts: "aaj"/"today" -> today, "kal"/"yesterday" -> yesterday,
+// "2026-09-28", "28-09-2026", "28/09/2026", "28.09.2026".
+// Returns 'YYYY-MM-DD' or null (invalid, or a future date).
+export function parseDateInput(text, todayISO) {
+  const t = String(text || '').trim().toLowerCase();
+  if (!t || !/^\d{4}-\d{2}-\d{2}$/.test(String(todayISO || ''))) return null;
+
+  const shiftDays = (iso, days) => {
+    const d = new Date(iso + 'T12:00:00Z');
+    d.setUTCDate(d.getUTCDate() + days);
+    return d.toISOString().slice(0, 10);
+  };
+
+  if (['aaj', 'aj', 'today'].includes(t)) return todayISO;
+  if (['kal', 'yesterday'].includes(t)) return shiftDays(todayISO, -1);
+
+  let y, m, d;
+  let mch = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (mch) {
+    [, y, m, d] = mch;
+  } else {
+    mch = t.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
+    if (!mch) return null;
+    [, d, m, y] = mch;
+  }
+  const iso = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  // Real calendar date? (rejects 31-02-2026 etc.)
+  const dt = new Date(iso + 'T12:00:00Z');
+  if (Number.isNaN(dt.getTime())) return null;
+  if (dt.toISOString().slice(0, 10) !== iso) return null;
+  if (iso > todayISO) return null; // no future bills
+  return iso;
 }
 
 // "2" with max 5 -> 2 ; "0"/"9"/"abc" -> null
