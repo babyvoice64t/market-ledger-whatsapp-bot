@@ -15,7 +15,7 @@ and replies with a formatted bill card.
    5000
    Inv#0988 imran ali
    ```
-5. 📅 **Bill ki date** bhejo — aaj ki hai to `aaj` likho, kal ki to `kal`, warna date (misal: `28-09-2026`)
+5. 📅 **Bill ki date** bhejo — `today` likho, ya custom date likho (misal: `28-09-2026`). `aaj`/`kal` bhi chalte hain
 6. ⚠️ Agar same party/type/amount/date ki entry akhri 3 ghante me ho chuki ho to bot poochega — *haan* likho phir bhi save karne ke liye, *nahi* likho cancel ke liye
 7. ✅ Entry ban gayi — bill card wapas aayega (backdate ho to 📅 date bhi dikhegi)
 

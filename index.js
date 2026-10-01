@@ -101,7 +101,7 @@ app.get('/qr', async (req, res) => {
   res.json({ qr: qrDataUrl, connected: isConnected });
 });
 
-app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, group: GROUP_NAME || null, version: '2.3.0' }));
+app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, group: GROUP_NAME || null, version: '2.4.0' }));
 
 // ─── Helpers ───
 function msgKeyId(key) { return `${key.remoteJid}:${key.id}`; }
@@ -181,7 +181,7 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
     parties = await ledger.getParties();
   } catch (e) {
     console.error('getParties fail:', e.message);
-    await sendText(groupJid, '❌ Portal se connect nahi ho saka. Thodi der baad dobara bhejo.', msg);
+    await sendText(groupJid, '❌ Portal se connect nahi ho saka. Thodi der baad retry karo.', msg);
     return { ok: false };
   }
 
@@ -254,7 +254,7 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
       // Cloudinary throttling: sale needs its bill photo, so nothing was saved.
       await sendText(
         groupJid,
-        '⏳ *Cloudinary ki limit lag gayi* — photo upload nahi hua, *entry save NAHI hui*.\n5-10 min baad bill dobara bhejo.',
+        '⏳ *Cloudinary ki limit lag gayi* — photo upload nahi hua, *entry save NAHI hui*.\n5-10 min baad bill dobara send karo.',
         msg
       );
     } else {
@@ -373,7 +373,7 @@ async function startBot() {
         const isPdf = !!doc && (docMime === 'application/pdf' || /\.pdf$/i.test(doc.fileName || ''));
         if (doc && !isPdf) {
           handledIds.add(msg.key.id);
-          await sendText(remoteJid, '❌ Sirf *photo* ya *PDF* bhejo. Baqi files support nahi hain.', msg);
+          await sendText(remoteJid, '❌ Sirf *photo* ya *PDF* send karo. Other files supported nahi hain.', msg);
           continue;
         }
         const media = img
@@ -395,7 +395,7 @@ async function startBot() {
             return await ledger.getParties();
           } catch (e) {
             console.error('getParties fail:', e.message);
-            await sendText(remoteJid, '❌ Portal se connect nahi ho saka. Thodi der baad dobara try karo.', msg);
+            await sendText(remoteJid, '❌ Portal se connect nahi ho saka. Thodi der baad retry karo.', msg);
             return null;
           }
         }
@@ -421,9 +421,9 @@ async function startBot() {
         function dupPrompt(partyName, entryType, amount, entryDate) {
           const typeLabel = entryType === 'sale' ? '💰 Sales' : '🧾 Receipt';
           return (
-            `⚠️ *Lagta hai ye entry pehle ho chuki hai:*\n` +
+            `⚠️ *Lagta hai ye entry already save ho chuki hai:*\n` +
             `🏪 Party: ${partyName}\n${typeLabel}: ${formatRs(amount)}\n📅 Date: ${entryDate}\n\n` +
-            `Phir bhi save karun? *haan* ya *nahi* likho`
+            `Phir bhi save karun? *haan* / *nahi*`
           );
         }
 
@@ -443,7 +443,7 @@ async function startBot() {
         function partyListPrompt(parties) {
           const shown = parties.slice(0, 50);
           const extra = parties.length > 50 ? `\n…aur ${parties.length - 50} parties (pehli 50 dikhayi hain)` : '';
-          return `🏪 Party select karo — *number* bhejo:\n${formatPartyList(shown)}${extra}\n\n❌ Cancel ke liye "cancel" likho`;
+          return `🏪 Party select karo — *number* send karo:\n${formatPartyList(shown)}${extra}\n\n❌ Cancel ke liye "cancel" likho`;
         }
 
         // ── bill queue: one active bill per sender, the rest wait their turn ──
@@ -489,7 +489,7 @@ async function startBot() {
           convos.start(senderKey, { buffer: item.buffer, mimetype: item.mimetype, filename: item.filename, kind: item.kind });
           const label = item.kind === 'pdf' ? 'PDF' : 'Photo';
           console.log(`📩 bill ${item.kind} in "${subject}" — asking party`);
-          await sendText(remoteJid, `📸 ${label} mil gayi!\n\n${partyListPrompt(parties)}`, msg);
+          await sendText(remoteJid, `📸 ${label} received!\n\n${partyListPrompt(parties)}`, msg);
         }
 
         // after an entry finishes, start the next queued bill (if any)
@@ -510,7 +510,7 @@ async function startBot() {
             buffer = await downloadMediaMessage(msg, 'buffer', {});
           } catch (e) {
             console.error('download fail:', e.message);
-            await sendText(remoteJid, '❌ File download nahi ho saki. Dobara bhejo.', msg);
+            await sendText(remoteJid, '❌ File download nahi ho saki. Dobara send karo.', msg);
             continue;
           }
           const item = { buffer, mimetype: media.mimetype, filename: media.filename, kind: media.kind, caption: media.caption };
@@ -518,12 +518,12 @@ async function startBot() {
             // busy with another bill → queue this one, it starts automatically later
             const q = getBillQueue();
             if (q.length >= MAX_QUEUE) {
-              await sendText(remoteJid, `⚠️ Queue full hai (${MAX_QUEUE} bills). Pehli entries complete hone do, phir bhejo.`, msg);
+              await sendText(remoteJid, `⚠️ Queue full hai (${MAX_QUEUE} bills). Pehli entries complete hone do, phir send karo.`, msg);
               continue;
             }
             q.push(item);
             console.log(`📸 bill queued at #${q.length}`);
-            await sendText(remoteJid, `📸 Bill mil gayi — queue me laga di (#${q.length}).\nPehli wali entry complete hote hi iska poochunga. 👆`, msg);
+            await sendText(remoteJid, `📸 Bill received — queue me laga di (#${q.length}).\nPehli entry complete hote hi iska poochunga 👆`, msg);
             continue;
           }
           const waiting = mediaQueues.get(senderKey);
@@ -542,14 +542,14 @@ async function startBot() {
         if (['undo', 'undo karo'].includes(text.toLowerCase().trim()) && !convos.get(senderKey)) {
           const last = lastEntries.get(senderKey);
           if (!last || Date.now() - last.at > UNDO_TTL_MS) {
-            await sendText(remoteJid, '❓ Undo ke liye koi recent entry nahi mili.\n(Sirf akhri 30 min me bot se bani hui entry undo ho sakti hai.)', msg);
+            await sendText(remoteJid, '❓ Undo ke liye koi recent entry nahi mili.\n(Sirf last 30 min me bot se bani entry undo ho sakti hai.)', msg);
             continue;
           }
           try {
             await ledger.deleteEntry(last.type, last.id);
             lastEntries.delete(senderKey);
             const typeLabel = last.type === 'sale' ? 'Sales' : 'Receipt';
-            await sendText(remoteJid, `🗑️ *Entry delete ho gayi:*\n🏪 ${last.partyName}\n💰 ${formatRs(last.amount)} (${typeLabel})`, msg);
+            await sendText(remoteJid, `🗑️ *Entry deleted:*\n🏪 ${last.partyName}\n💰 ${formatRs(last.amount)} (${typeLabel})`, msg);
             console.log(`↩️ undo: deleted ${last.type} #${last.id} (${last.partyName} ${last.amount})`);
           } catch (e) {
             console.error('undo fail:', e.message);
@@ -574,7 +574,7 @@ async function startBot() {
           const left = mediaQueues.get(senderKey)?.length || 0;
           await sendText(
             remoteJid,
-            left ? `❌ Ye bill cancel ho gayi. Ab queue me lagi agli bill shuru karta hun…` : '❌ Cancel ho gaya. Nayi bill ke liye dobara photo/PDF bhejo.',
+            left ? `❌ Ye bill cancel ho gayi. Ab queue ki next bill start karta hun…` : '❌ Cancel ho gaya. New bill ke liye dobara photo/PDF send karo.',
             msg
           );
           await advanceQueue();
@@ -609,13 +609,13 @@ async function startBot() {
           if (!parties) { convos.clear(senderKey); continue; }
           const n = parseSelection(text, Math.min(parties.length, 50));
           if (!n) {
-            await sendText(remoteJid, `❌ 1 se ${Math.min(parties.length, 50)} tak ka number bhejo.\n\n${partyListPrompt(parties)}`, msg);
+            await sendText(remoteJid, `❌ 1 se ${Math.min(parties.length, 50)} tak ka number send karo.\n\n${partyListPrompt(parties)}`, msg);
             continue;
           }
           const party = parties[n - 1];
           convos.setStep(senderKey, STEPS.TYPE, { partyId: party.id, partyName: party.name });
           console.log(`👉 party chosen: ${party.name}`);
-          await sendText(remoteJid, `🏪 Party: *${party.name}*\n\nAb type select karo:\n1. 💰 Sales (bill aaya)\n2. 🧾 Receipt (paisay mile)\n\n❌ Cancel ke liye "cancel" likho`, msg);
+          await sendText(remoteJid, `🏪 Party: *${party.name}*\n\nEntry type select karo:\n1. 💰 Sales\n2. 🧾 Receipt\n\n❌ Cancel ke liye "cancel" likho`, msg);
           continue;
         }
 
@@ -624,27 +624,27 @@ async function startBot() {
           if (low === '1' || low === 'sales' || low === 'sale') entryType = 'sale';
           else if (low === '2' || low === 'receipt' || low === 'receipts') entryType = 'receipt';
           if (!entryType) {
-            await sendText(remoteJid, '❌ "1" bhejo Sales ke liye, "2" bhejo Receipt ke liye.', msg);
+            await sendText(remoteJid, '❌ Sales ke liye "1", Receipt ke liye "2" send karo.', msg);
             continue;
           }
           convos.setStep(senderKey, STEPS.AMOUNT, { entryType });
           const label = entryType === 'sale' ? '💰 Sales' : '🧾 Receipt';
           console.log(`👉 type chosen: ${entryType}`);
-          await sendText(remoteJid, `✅ ${label}\n\n🔢 Ab *amount* bhejo, aur chaaho to *neeche* description bhi likh do:\n\n5000\nInv#0988 imran ali\n\n❌ Cancel ke liye "cancel" likho`, msg);
+          await sendText(remoteJid, `✅ ${label}\n\n🔢 Ab *amount* send karo — first line me sirf amount, neeche description bhi likh sakte ho (optional):\n\n5000\nInv#0988 imran ali\n\n❌ Cancel ke liye "cancel" likho`, msg);
           continue;
         }
 
         if (sess.step === STEPS.AMOUNT) {
           const { amount, description } = parseAmountAndDescription(text);
           if (amount === null) {
-            await sendText(remoteJid, '❌ Pehli line me sahi amount likho (misal: 50000). Description amount ke *neeche* wali line me likho.', msg);
+            await sendText(remoteJid, '❌ First line me sahi amount likho (misal: 50000). Description next line me likho.', msg);
             continue;
           }
           convos.setStep(senderKey, STEPS.DATE, { amount, description });
           console.log(`👉 amount entered: ${amount}${description ? ` | desc: ${description.slice(0, 40)}` : ''} — asking date`);
           await sendText(
             remoteJid,
-            `✅ Amount: ${formatRs(amount)}${description ? `\n📝 ${description}` : ''}\n\n📅 Bill ki *date* kya hai?\nAaj ki hai to *aaj* likho, warna date bhejo (misal: 28-09-2026):\n\n❌ Cancel ke liye "cancel" likho`,
+            `✅ Amount: ${formatRs(amount)}${description ? `\n📝 ${description}` : ''}\n\n📅 Bill ki *date* kya hai?\n*today* likho, ya custom date likho (misal: 28-09-2026):\n\n❌ Cancel ke liye "cancel" likho`,
             msg
           );
           continue;
@@ -654,7 +654,7 @@ async function startBot() {
           const s = convos.get(senderKey);
           const entryDate = parseDateInput(text, todayPK());
           if (!entryDate) {
-            await sendText(remoteJid, '❌ Sahi date likho: *aaj*, *kal*, ya date (misal: 28-09-2026 ya 2026-09-28).', msg);
+            await sendText(remoteJid, '❌ Sahi date likho: *today* likho, ya custom date (misal: 28-09-2026 ya 2026-09-28).', msg);
             continue;
           }
           const dup = await findDuplicate(s.partyId, s.entryType, s.amount, entryDate);
@@ -678,10 +678,10 @@ async function startBot() {
           }
           if (['nahi', 'nahin', 'na', 'no', 'n', '2'].includes(low)) {
             convos.clear(senderKey);
-            await sendText(remoteJid, '❌ Theek hai, entry save nahi ki.', msg);
+            await sendText(remoteJid, '❌ OK, entry save nahi ki.', msg);
             continue;
           }
-          await sendText(remoteJid, '❓ *haan* likho save karne ke liye, *nahi* likho cancel ke liye.', msg);
+          await sendText(remoteJid, '❓ Save ke liye *haan*, cancel ke liye *nahi* likho.', msg);
           continue;
         }
 
