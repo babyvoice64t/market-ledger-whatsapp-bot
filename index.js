@@ -22,14 +22,13 @@ import { Boom } from '@hapi/boom';
 import { v2 as cloudinary } from 'cloudinary';
 import { parseCaption, formatRs, USAGE_TEXT } from './parser.js';
 import { createLedgerClient, createUserLedgerClient } from './ledger.js';
-import { parseAuthCommand } from './authcmd.js';
+import { parseActivateCommand } from './botcmd.js';
 import { createConvoStore, STEPS, parseAmountAndDescription, parseSelection, parseDateInput, formatPartyList, CANCEL_WORDS } from './convo.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
 const LEDGER_URL = (process.env.LEDGER_URL || 'https://market-ledger-vault.pages.dev').replace(/\/+$/, '');
 const LEDGER_PASSWORD = process.env.LEDGER_PASSWORD || '';
-const GROUP_NAME = process.env.GROUP_NAME || '';
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME || '',
@@ -38,21 +37,55 @@ cloudinary.config({
 });
 
 if (!LEDGER_PASSWORD) console.warn('⚠️ LEDGER_PASSWORD not set — bot cannot talk to the ledger');
-if (!GROUP_NAME) console.warn('⚠️ GROUP_NAME not set — bot will ignore every group');
 
 const ledger = createLedgerClient({ baseUrl: LEDGER_URL, password: LEDGER_PASSWORD });
 
-// ─── Per-user WhatsApp sessions ───
-// senderKey -> { client, username }. Staff log in with their portal user ID
-// (`login <user-id> <password>` in the group or in DM); their bills then land
-// in THEIR ledger (per-user isolation). Senders who never log in keep the old
-// behavior: the shared admin client. Credentials live in memory only.
-const userSessions = new Map();
-function ledgerFor(senderKey) {
-  return userSessions.get(senderKey)?.client || ledger;
+// ─── Group bindings: WhatsApp group JID -> customer ledger ───
+// A group is bound with `activate <user-id> <password>` (typed in the group).
+// One user ID = one group (enforced server-side). Bills in a bound group are
+// created with that user's token, so entries land in THEIR ledger only.
+// Unbound groups are completely silent (except the activate command).
+// The bot never stores user passwords — tokens are minted via /api/bot-groups/token.
+const groupBindings = new Map(); // jid -> { client, username, name }
+
+// A ledger client acting as `username`, with tokens minted by the backend
+// (admin-authorized). Auto-refreshes on expiry; survives bot restarts.
+function userClientFor(username) {
+  return createLedgerClient({
+    baseUrl: LEDGER_URL,
+    loginFn: async () => {
+      const t = await ledger.ensureToken();
+      const r = await fetch(`${LEDGER_URL}/api/bot-groups/token?password=${encodeURIComponent(t)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok || !j.token) throw new Error(j.error || 'user token failed');
+      return j.token;
+    },
+  });
 }
-function sessionUsername(senderKey) {
-  return userSessions.get(senderKey)?.username || null;
+
+// Load/refresh bindings from the portal (admin API). Keeps existing clients.
+async function refreshGroupBindings() {
+  try {
+    const t = await ledger.ensureToken();
+    const r = await fetch(`${LEDGER_URL}/api/bot-groups?password=${encodeURIComponent(t)}`);
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !Array.isArray(j.groups)) throw new Error(j.error || 'groups fetch failed');
+    const next = new Map();
+    for (const g of j.groups) {
+      const prev = groupBindings.get(g.jid);
+      if (prev && prev.username === g.username) next.set(g.jid, prev);
+      else next.set(g.jid, { client: userClientFor(g.username), username: g.username, name: g.name || '' });
+    }
+    groupBindings.clear();
+    for (const [k, v] of next) groupBindings.set(k, v);
+    console.log(`📋 group bindings refreshed: ${groupBindings.size} active`);
+  } catch (e) {
+    console.error('refreshGroupBindings fail:', e.message);
+  }
 }
 
 const logger = pino({ level: 'silent' });
@@ -94,13 +127,13 @@ h1{font-size:20px;font-weight:800;letter-spacing:-.02em}
 .stat{margin-top:12px;padding:12px;border-radius:12px;background:#fafafa;border:1px solid #f0f0f0;font-size:12px;color:#52525b;line-height:1.7;font-family:monospace;white-space:pre-wrap}</style></head>
 <body><div class="card">
 <h1>Market Ledger WhatsApp Bot</h1>
-<div class="sub">Ledger: ${LEDGER_URL}<br>Group: ${GROUP_NAME || '(not set)'}</div>
+<div class="sub">Ledger: ${LEDGER_URL}<br>Active groups: <span id="gCount">—</span></div>
 <div class="qr-box" id="qrBox"><span class="wait">Loading...</span></div>
 <div class="stat" id="stBox">—</div>
 </div>
 <script>
 async function poll(){try{const r=await fetch('/qr');const j=await r.json();
-let s='Status: '+(j.connected?'Connected ✅':'Disconnected ❌')+'\\nGroup: ${GROUP_NAME || '(not set)'}';
+let s='Status: '+(j.connected?'Connected ✅':'Disconnected ❌')+'\\nActive groups: '+(j.groups??'—');
 document.getElementById('stBox').textContent=s;
 if(j.qr){document.getElementById('qrBox').innerHTML='<img src="'+j.qr+'">'}
 else if(j.connected){document.getElementById('qrBox').innerHTML='<span class="ok">✅ Connected — send a bill photo or PDF in the group and follow the steps</span>'}
@@ -112,10 +145,10 @@ poll();setInterval(poll,3000);
 app.get('/qr', async (req, res) => {
   let qrDataUrl = null;
   if (qrString) { try { qrDataUrl = await QRCode.toDataURL(qrString); } catch {} }
-  res.json({ qr: qrDataUrl, connected: isConnected });
+  res.json({ qr: qrDataUrl, connected: isConnected, groups: groupBindings.size });
 });
 
-app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, group: GROUP_NAME || null, version: '2.4.0' }));
+app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, groups: groupBindings.size, version: '2.6.0' }));
 
 // ─── Helpers ───
 function msgKeyId(key) { return `${key.remoteJid}:${key.id}`; }
@@ -175,54 +208,95 @@ function todayPK() {
   }).format(new Date());
 }
 
-// ─── Staff auth: login <user-id> <password> / logout / me ───
-// Works in the group AND in DM (DM is safer — group me password sab dekhte hain).
-// A logged-in sender's bills are created with THEIR user token, so entries land
-// in their own ledger (per-user isolation). Passwords are never logged.
-async function handleAuthCommand({ remoteJid, senderKey, authCmd, msg, isDM }) {
-  const where = isDM ? 'DM' : 'group';
-  if (authCmd.cmd === 'login') {
-    const { username, password } = authCmd;
-    const client = createUserLedgerClient({ baseUrl: LEDGER_URL, username, password });
-    try {
-      await client.ensureToken();
-    } catch (e) {
-      console.log(`🔐 login failed for "${username}" via ${where} (status=${e.status || '?'})`);
-      if (e.status === 401) {
-        await sendText(remoteJid, '❌ Ghalat user ID ya password. Dobara try karo:\nlogin <user-id> <password>', msg);
-      } else if (e.status === 403) {
-        await sendText(remoteJid, '⛔ Ye account block hai. Admin se rabta karo.', msg);
-      } else if (e.status === 429) {
-        await sendText(remoteJid, '⏳ Bohat sari koshishen ho gayin — thodi der baad try karo.', msg);
-      } else {
-        await sendText(remoteJid, `❌ Login nahi ho saka: ${e.message || 'unknown error'}`, msg);
-      }
-      return;
-    }
-    userSessions.set(senderKey, { client, username });
-    convos.clear(senderKey); // identity changed → drop any half-done bill flow
-    console.log(`🔐 "${username}" logged in via WhatsApp ${where}`);
+// ─── DM promo reply (no functionality in personal chat) ───
+const PROMO_TEXT = (
+  '🤖 *Live Tech — Automation & Software*\n\n' +
+  'Assalam-o-Alaikum! Main WhatsApp automation bot hun.\n\n' +
+  'Hum businesses ke liye automation aur custom software banate hain — ' +
+  'WhatsApp bots, ledger systems aur bohat kuch.\n\n' +
+  '📞 Contact: 0317-3291218'
+);
+
+function normalizeJid(jid) {
+  return String(jid || '').split('@')[0].split(':')[0];
+}
+
+// Is the bot a group admin? (needed to delete the password-carrying message)
+async function isBotGroupAdmin(groupJid) {
+  try {
+    const meta = await sock.groupMetadata(groupJid);
+    const me = normalizeJid(sock.user?.id);
+    const p = (meta.participants || []).find((x) => normalizeJid(x.id) === me);
+    return !!(p && (p.admin === 'admin' || p.admin === 'superadmin'));
+  } catch (e) {
+    console.error('groupMetadata fail:', e.message);
+    return false;
+  }
+}
+
+async function deleteMessage(jid, key) {
+  try {
+    await sock.sendMessage(jid, { delete: key });
+    return true;
+  } catch (e) {
+    console.error('deleteMessage fail:', e.message);
+    return false;
+  }
+}
+
+// ─── Group activation: `activate <user-id> <password>` ───
+// Binds this WhatsApp group (by unique JID) to a user ID — one user ID = one
+// group (enforced server-side). The password message is deleted right away so
+// it doesn't stay visible in the chat. The password itself is never stored.
+async function handleActivate({ remoteJid, msg, username, password }) {
+  if (!(await isBotGroupAdmin(remoteJid))) {
     await sendText(
       remoteJid,
-      `✅ *Login ho gaya!*\n👤 User: *${username}*\nAb tumhari sale/receipt entries *tumhare ledger* me jayengi.`,
+      '❌ Pehle mujhe *group admin* banao, phir dobara likho:\n`activate <user-id> <password>`',
       msg
     );
     return;
   }
-  if (authCmd.cmd === 'logout') {
-    const had = userSessions.delete(senderKey);
-    convos.clear(senderKey);
-    console.log(`🔐 logout via ${where} (had session: ${had})`);
-    await sendText(remoteJid, had ? '👋 Logout ho gaya.' : '❌ Tum login hi nahi thay.', msg);
+  await deleteMessage(remoteJid, msg.key); // password exposure khatam
+  const check = createUserLedgerClient({ baseUrl: LEDGER_URL, username, password });
+  try {
+    await check.ensureToken();
+  } catch (e) {
+    console.log(`🔐 activate: credential check failed for "${username}" (status=${e.status || '?'})`);
+    if (e.status === 401) await sendText(remoteJid, '❌ Ghalat user ID ya password.', msg);
+    else if (e.status === 403) await sendText(remoteJid, '⛔ Ye account block hai. Admin se rabta karo.', msg);
+    else if (e.status === 429) await sendText(remoteJid, '⏳ Bohat sari koshishen — thodi der baad try karo.', msg);
+    else await sendText(remoteJid, `❌ Activate nahi ho saka: ${e.message || 'unknown error'}`, msg);
     return;
   }
-  // me / whoami
-  const u = sessionUsername(senderKey);
+  let subject = '';
+  try { subject = await groupSubject(remoteJid); } catch {}
+  try {
+    const t = await ledger.ensureToken();
+    const r = await fetch(`${LEDGER_URL}/api/bot-groups?password=${encodeURIComponent(t)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jid: remoteJid, name: subject, username }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      if (r.status === 409) {
+        await sendText(remoteJid, '❌ Ye ID pehle se kisi aur group me active hai.\nEk ID sirf ek group me chal sakti hai.', msg);
+      } else {
+        await sendText(remoteJid, `❌ Activate nahi ho saka: ${j.error || 'unknown error'}`, msg);
+      }
+      return;
+    }
+  } catch (e) {
+    console.error('activate bind fail:', e.message);
+    await sendText(remoteJid, `❌ Activate nahi ho saka: ${e.message}`, msg);
+    return;
+  }
+  groupBindings.set(remoteJid, { client: userClientFor(username), username, name: subject });
+  console.log(`✅ group activated: "${subject}" -> ${username}`);
   await sendText(
     remoteJid,
-    u
-      ? `👤 Tum *${u}* ke naam se login ho.\nTumhari entries tumhare ledger me jayengi.`
-      : '❌ Tum login nahi ho.\nLogin karo: login <user-id> <password>\n_(password DM me bhejna behtar hai — group me sab dekhte hain)_',
+    `✅ *Activated!*\n👤 User: *${username}*\nAb is group ke bills *tumhare ledger* me jayenge.`,
     msg
   );
 }
@@ -236,13 +310,13 @@ const UNDO_TTL_MS = 30 * 60 * 1000;
 // senderKey -> bills waiting their turn (one active bill per sender at a time)
 const mediaQueues = new Map();
 const MAX_QUEUE = 10;
-async function processBill(groupJid, msg, parsed, buffer, media, description, entryDate, senderKey) {
+async function processBill(groupJid, msg, parsed, buffer, media, description, entryDate, client) {
   const kind = media?.kind || 'image';
   const mimetype = media?.mimetype || 'image/jpeg';
   const filename = media?.filename || `bill_${Date.now()}.jpg`;
   const date = entryDate || todayPK();
   const desc = String(description || '').trim() || 'Added via WhatsApp';
-  const L = ledgerFor(senderKey); // logged-in user -> their own ledger; else shared admin
+  const L = client; // this group's bound customer ledger
   let parties;
   try {
     parties = await L.getParties();
@@ -298,9 +372,6 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
     const lines = [title, `🏪 Party: ${party.name}`, `💰 Amount: ${formatRs(parsed.amount)}`];
     if (desc !== 'Added via WhatsApp') lines.push(`📝 ${desc}`);
     if (date !== todayPK()) lines.push(`📅 Date: ${date}`);
-    const who = sessionUsername(senderKey);
-    if (who) lines.push(`👤 Ledger: ${who}`);
-    else lines.push('💡 Apne ledger me entry ke liye DM me login karo: login <user-id> <password>');
     if (photoFailed) {
       lines.push('⚠️ Bill ki photo upload nahi ho saki (Cloudinary) — entry save ho gayi hai.');
     }
@@ -430,28 +501,34 @@ async function startBot() {
         if (!isGroup && !isDM) continue;
         if (handledIds.has(msg.key.id)) continue;
 
-        // DMs only support auth commands (login/logout/me) — bills stay group-only.
-        let subject = '';
-        if (isGroup) {
-          if (!GROUP_NAME) continue;
-          subject = await groupSubject(remoteJid);
-          if (subject !== GROUP_NAME) continue; // only the configured group
-        }
-
         const inner = unwrapMsg(msg.message);
         const img = inner.imageMessage;
         const doc = inner.documentMessage;
         const text = String(inner.conversation || inner.extendedTextMessage?.text || '').trim();
         const senderKey = msg.key.participant || msg.pushName || remoteJid;
 
-        // ── staff auth: login <user-id> <password> / logout / me (group + DM) ──
-        const authCmd = parseAuthCommand(text);
-        if (authCmd) {
+        // ── DMs: promo reply only, no functionality ──
+        if (isDM) {
           handledIds.add(msg.key.id);
-          await handleAuthCommand({ remoteJid, senderKey, authCmd, msg, isDM });
+          await sendText(remoteJid, PROMO_TEXT, msg);
           continue;
         }
-        if (!isGroup) continue; // bills, undo etc. are group-only
+
+        // ── groups: only bound (activated) groups work ──
+        const binding = groupBindings.get(remoteJid);
+        if (!binding) {
+          const act = parseActivateCommand(text);
+          if (act) {
+            handledIds.add(msg.key.id);
+            if (act.usage) {
+              await sendText(remoteJid, 'Activate karne ke liye likho:\n`activate <user-id> <password>`\n\nNote: mujhe *group admin* banao taake password wala message delete ho sake.', msg);
+            } else {
+              await handleActivate({ remoteJid, msg, username: act.username, password: act.password });
+            }
+          }
+          continue; // unbound group: silent
+        }
+        const client = binding.client; // this group's customer ledger
 
         // bill media = photo, or a PDF document
         const docMime = String(doc?.mimetype || '').toLowerCase();
@@ -477,7 +554,7 @@ async function startBot() {
         // ── helper: fetch parties or bail out with an error message ──
         async function needParties() {
           try {
-            return await ledgerFor(senderKey).getParties();
+            return await client.getParties();
           } catch (e) {
             console.error('getParties fail:', e.message);
             await sendText(remoteJid, '❌ Portal se connect nahi ho saka. Thodi der baad retry karo.', msg);
@@ -488,7 +565,7 @@ async function startBot() {
         // ── helper: duplicate detection (same party + type + amount + date, last 3h) ──
         async function findDuplicate(partyId, entryType, amount, entryDate) {
           try {
-            const recent = await ledgerFor(senderKey).getRecentEntries(partyId, 180);
+            const recent = await client.getRecentEntries(partyId, 180);
             return (
               recent.find(
                 (e) =>
@@ -520,7 +597,7 @@ async function startBot() {
             `👉 creating ${s.entryType}: ${s.partyName} ${s.amount} date=${s.entryDate}` +
               (s.description ? ` desc=${s.description.slice(0, 40)}` : '')
           );
-          const res = await processBill(remoteJid, msg, parsed, s.media.buffer, s.media, s.description, s.entryDate, senderKey);
+          const res = await processBill(remoteJid, msg, parsed, s.media.buffer, s.media, s.description, s.entryDate, client);
           trackLastEntry(senderKey, res);
           await advanceQueue(); // start the next queued bill, if any
         }
@@ -544,10 +621,10 @@ async function startBot() {
           convos.clear(senderKey);
           if (parsed.ok) {
             // shortcut: "<party> sales|receipt <amount>" caption still works instantly
-            console.log(`📩 bill ${item.kind} in "${subject}": caption="${item.caption.slice(0, 80)}"`);
+            console.log(`📩 bill ${item.kind} in "${binding.name}": caption="${item.caption.slice(0, 80)}"`);
             const parties = await needParties();
             const today = todayPK();
-            const party = parties ? ledgerFor(senderKey).findParty(parties, parsed.partyName) : null;
+            const party = parties ? client.findParty(parties, parsed.partyName) : null;
             const dup = party ? await findDuplicate(party.id, parsed.type, parsed.amount, today) : null;
             if (dup) {
               // duplicate suspected → ask instead of creating instantly
@@ -559,7 +636,7 @@ async function startBot() {
               console.log(`⚠️ duplicate suspected (caption shortcut): ${party.name} ${parsed.amount}`);
               await sendText(remoteJid, dupPrompt(party.name, parsed.type, parsed.amount, today), msg);
             } else {
-              const res = await processBill(remoteJid, msg, parsed, item.buffer, item, undefined, undefined, senderKey);
+              const res = await processBill(remoteJid, msg, parsed, item.buffer, item, undefined, undefined, client);
               trackLastEntry(senderKey, res);
             }
             return;
@@ -573,7 +650,7 @@ async function startBot() {
           }
           convos.start(senderKey, { buffer: item.buffer, mimetype: item.mimetype, filename: item.filename, kind: item.kind });
           const label = item.kind === 'pdf' ? 'PDF' : 'Photo';
-          console.log(`📩 bill ${item.kind} in "${subject}" — asking party`);
+          console.log(`📩 bill ${item.kind} in "${binding.name}" — asking party`);
           await sendText(remoteJid, `📸 ${label} received!\n\n${partyListPrompt(parties)}`, msg);
         }
 
@@ -631,7 +708,7 @@ async function startBot() {
             continue;
           }
           try {
-            await ledgerFor(senderKey).deleteEntry(last.type, last.id);
+            await client.deleteEntry(last.type, last.id);
             lastEntries.delete(senderKey);
             const typeLabel = last.type === 'sale' ? 'Sales' : 'Receipt';
             await sendText(remoteJid, `🗑️ *Entry deleted:*\n🏪 ${last.partyName}\n💰 ${formatRs(last.amount)} (${typeLabel})`, msg);
@@ -673,7 +750,7 @@ async function startBot() {
             const s = convos.get(senderKey);
             const parties = await needParties();
             const today = todayPK();
-            const party = parties ? ledgerFor(senderKey).findParty(parties, shortcut.partyName) : null;
+            const party = parties ? client.findParty(parties, shortcut.partyName) : null;
             const dup = party ? await findDuplicate(party.id, shortcut.type, shortcut.amount, today) : null;
             if (dup) {
               convos.setStep(senderKey, STEPS.CONFIRM, {
@@ -685,7 +762,7 @@ async function startBot() {
             } else {
               convos.clear(senderKey);
               console.log(`📩 caption shortcut in "${subject}": "${text.slice(0, 80)}"`);
-              const res = await processBill(remoteJid, msg, shortcut, s.media.buffer, s.media, undefined, undefined, senderKey);
+              const res = await processBill(remoteJid, msg, shortcut, s.media.buffer, s.media, undefined, undefined, client);
               trackLastEntry(senderKey, res);
             }
             continue;
@@ -781,7 +858,9 @@ async function startBot() {
 }
 
 app.listen(PORT, () => {
-  console.log(`🌐 Dashboard on :${PORT} — group: ${GROUP_NAME || '(unset)'}`);
+  console.log(`🌐 Dashboard on :${PORT}`);
+  refreshGroupBindings(); // load bound groups at startup…
+  setInterval(refreshGroupBindings, 5 * 60 * 1000); // …and keep them fresh
   startBot().catch((e) => {
     console.error('startBot failed:', e.message);
     setTimeout(startBot, 5000);

@@ -21,15 +21,21 @@ and replies with a formatted bill card.
 
 **`undo`** — akhri 30 min me bot se bani entry delete karne ke liye `undo` likho (koi active session na ho).
 
-## Staff login (apna ledger)
+## Group activation (har customer ka apna ledger)
 
-Har staff member apni **user ID + password** se login kare to uski entries **sirf uske apne ledger** me jayengi (portal/app me wahi dikhengi):
+Bot **sirf activated groups** me kaam karta hai. Ek user ID = ek WhatsApp group:
 
-- `login <user-id> <password>` — login (group me ya **DM me** — DM behtar hai, group me password sab dekhte hain)
-- `logout` — logout
-- `me` — dekho kis naam se login ho
+1. Bot ko customer ke WhatsApp group me add karo aur **admin** banao
+2. Group me likho: `activate <user-id> <password>` (misal: `activate imran01 pass123`)
+3. Bot credentials check karega → **password wala message delete** kar dega → `✅ Activated!` reply karega
+4. Ab us group ke bills **sirf us customer ke ledger** me jayenge
 
-Login ke baghair bheji gayi entries pehle jaisi **admin/shared** ledger me jati hain. Bill card me `👤 Ledger: <user>` likha aata hai jab login ho, warna login ka hint.
+- Same naam ke duplicate groups me kaam **nahi** karega (match unique group ID se hota hai)
+- Koi aur ID/password se `activate` kare to reject: *"Ye ID pehle se kisi aur group me active hai"*
+- Unbind **sirf admin portal** se hota hai (WhatsApp Groups section)
+- Bot admin na ho to activation se pehle bolega: *"Pehle mujhe group admin banao"*
+
+**DM me:** koi kaam nahi — sirf Live Tech ka promo reply aata hai.
 
 **Ek saath kayi bills** — 4-5 photos/PDF ek saath bhej do to koi bill zaya nahi hogi: pehli bill ka flow chalega, baqi **queue** me lag jayengi (#1, #2…) aur ek-ek karke khud hi poochi jayengi. `cancel` = sirf current bill cancel (+ agli queued bill shuru), `cancel all` = sab kuch clear.
 
