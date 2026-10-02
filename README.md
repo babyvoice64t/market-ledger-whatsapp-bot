@@ -25,10 +25,12 @@ and replies with a formatted bill card.
 
 Bot **sirf activated groups** me kaam karta hai. Ek user ID = ek WhatsApp group:
 
-1. Bot ko customer ke WhatsApp group me add karo aur **admin** banao
+1. Bot ko customer ke WhatsApp group me add karo
 2. Group me likho: `activate <user-id> <password>` (misal: `activate imran01 pass123`)
-3. Bot credentials check karega → **password wala message delete** kar dega → `✅ Activated!` reply karega
+3. Bot credentials check karega → password wala message delete karne ki koshish karega → `✅ Activated!` reply karega
 4. Ab us group ke bills **sirf us customer ke ledger** me jayenge
+
+> 🔒 Bot kehta hai: apna activate wala message khud delete kar do (long press → delete) taake password kisi ko nazar na aaye. (Bot admin ho to wo khud delete kar deta hai.)
 
 - Same naam ke duplicate groups me kaam **nahi** karega (match unique group ID se hota hai)
 - Koi aur ID/password se `activate` kare to reject: *"Ye ID pehle se kisi aur group me active hai"*

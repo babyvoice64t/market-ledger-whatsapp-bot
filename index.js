@@ -217,23 +217,6 @@ const PROMO_TEXT = (
   '📞 Contact: 0317-3291218'
 );
 
-function normalizeJid(jid) {
-  return String(jid || '').split('@')[0].split(':')[0];
-}
-
-// Is the bot a group admin? (needed to delete the password-carrying message)
-async function isBotGroupAdmin(groupJid) {
-  try {
-    const meta = await sock.groupMetadata(groupJid);
-    const me = normalizeJid(sock.user?.id);
-    const p = (meta.participants || []).find((x) => normalizeJid(x.id) === me);
-    return !!(p && (p.admin === 'admin' || p.admin === 'superadmin'));
-  } catch (e) {
-    console.error('groupMetadata fail:', e.message);
-    return false;
-  }
-}
-
 async function deleteMessage(jid, key) {
   try {
     await sock.sendMessage(jid, { delete: key });
@@ -249,15 +232,8 @@ async function deleteMessage(jid, key) {
 // group (enforced server-side). The password message is deleted right away so
 // it doesn't stay visible in the chat. The password itself is never stored.
 async function handleActivate({ remoteJid, msg, username, password }) {
-  if (!(await isBotGroupAdmin(remoteJid))) {
-    await sendText(
-      remoteJid,
-      '❌ Pehle mujhe *group admin* banao, phir dobara likho:\n`activate <user-id> <password>`',
-      msg
-    );
-    return;
-  }
-  await deleteMessage(remoteJid, msg.key); // password exposure khatam
+  // best-effort: bot group admin ho to ye message delete ho jayega, warna nahi
+  await deleteMessage(remoteJid, msg.key);
   const check = createUserLedgerClient({ baseUrl: LEDGER_URL, username, password });
   try {
     await check.ensureToken();
@@ -296,7 +272,7 @@ async function handleActivate({ remoteJid, msg, username, password }) {
   console.log(`✅ group activated: "${subject}" -> ${username}`);
   await sendText(
     remoteJid,
-    `✅ *Activated!*\n👤 User: *${username}*\nAb is group ke bills *tumhare ledger* me jayenge.`,
+    `✅ *Activated!*\n👤 User: *${username}*\nAb is group ke bills *tumhare ledger* me jayenge.\n\n🔒 Apna activate wala message khud delete kar do (long press → delete) taake password kisi ko nazar na aaye.`,
     msg
   );
 }
@@ -521,7 +497,7 @@ async function startBot() {
           if (act) {
             handledIds.add(msg.key.id);
             if (act.usage) {
-              await sendText(remoteJid, 'Activate karne ke liye likho:\n`activate <user-id> <password>`\n\nNote: mujhe *group admin* banao taake password wala message delete ho sake.', msg);
+              await sendText(remoteJid, 'Activate karne ke liye likho:\n`activate <user-id> <password>`', msg);
             } else {
               await handleActivate({ remoteJid, msg, username: act.username, password: act.password });
             }
