@@ -21,7 +21,8 @@ import { fileURLToPath } from 'url';
 import { Boom } from '@hapi/boom';
 import { v2 as cloudinary } from 'cloudinary';
 import { parseCaption, formatRs, USAGE_TEXT } from './parser.js';
-import { createLedgerClient } from './ledger.js';
+import { createLedgerClient, createUserLedgerClient } from './ledger.js';
+import { parseAuthCommand } from './authcmd.js';
 import { createConvoStore, STEPS, parseAmountAndDescription, parseSelection, parseDateInput, formatPartyList, CANCEL_WORDS } from './convo.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -40,6 +41,19 @@ if (!LEDGER_PASSWORD) console.warn('⚠️ LEDGER_PASSWORD not set — bot canno
 if (!GROUP_NAME) console.warn('⚠️ GROUP_NAME not set — bot will ignore every group');
 
 const ledger = createLedgerClient({ baseUrl: LEDGER_URL, password: LEDGER_PASSWORD });
+
+// ─── Per-user WhatsApp sessions ───
+// senderKey -> { client, username }. Staff log in with their portal user ID
+// (`login <user-id> <password>` in the group or in DM); their bills then land
+// in THEIR ledger (per-user isolation). Senders who never log in keep the old
+// behavior: the shared admin client. Credentials live in memory only.
+const userSessions = new Map();
+function ledgerFor(senderKey) {
+  return userSessions.get(senderKey)?.client || ledger;
+}
+function sessionUsername(senderKey) {
+  return userSessions.get(senderKey)?.username || null;
+}
 
 const logger = pino({ level: 'silent' });
 function makeSimpleCache(ttlSec = 0) {
@@ -161,6 +175,58 @@ function todayPK() {
   }).format(new Date());
 }
 
+// ─── Staff auth: login <user-id> <password> / logout / me ───
+// Works in the group AND in DM (DM is safer — group me password sab dekhte hain).
+// A logged-in sender's bills are created with THEIR user token, so entries land
+// in their own ledger (per-user isolation). Passwords are never logged.
+async function handleAuthCommand({ remoteJid, senderKey, authCmd, msg, isDM }) {
+  const where = isDM ? 'DM' : 'group';
+  if (authCmd.cmd === 'login') {
+    const { username, password } = authCmd;
+    const client = createUserLedgerClient({ baseUrl: LEDGER_URL, username, password });
+    try {
+      await client.ensureToken();
+    } catch (e) {
+      console.log(`🔐 login failed for "${username}" via ${where} (status=${e.status || '?'})`);
+      if (e.status === 401) {
+        await sendText(remoteJid, '❌ Ghalat user ID ya password. Dobara try karo:\nlogin <user-id> <password>', msg);
+      } else if (e.status === 403) {
+        await sendText(remoteJid, '⛔ Ye account block hai. Admin se rabta karo.', msg);
+      } else if (e.status === 429) {
+        await sendText(remoteJid, '⏳ Bohat sari koshishen ho gayin — thodi der baad try karo.', msg);
+      } else {
+        await sendText(remoteJid, `❌ Login nahi ho saka: ${e.message || 'unknown error'}`, msg);
+      }
+      return;
+    }
+    userSessions.set(senderKey, { client, username });
+    convos.clear(senderKey); // identity changed → drop any half-done bill flow
+    console.log(`🔐 "${username}" logged in via WhatsApp ${where}`);
+    await sendText(
+      remoteJid,
+      `✅ *Login ho gaya!*\n👤 User: *${username}*\nAb tumhari sale/receipt entries *tumhare ledger* me jayengi.`,
+      msg
+    );
+    return;
+  }
+  if (authCmd.cmd === 'logout') {
+    const had = userSessions.delete(senderKey);
+    convos.clear(senderKey);
+    console.log(`🔐 logout via ${where} (had session: ${had})`);
+    await sendText(remoteJid, had ? '👋 Logout ho gaya.' : '❌ Tum login hi nahi thay.', msg);
+    return;
+  }
+  // me / whoami
+  const u = sessionUsername(senderKey);
+  await sendText(
+    remoteJid,
+    u
+      ? `👤 Tum *${u}* ke naam se login ho.\nTumhari entries tumhare ledger me jayengi.`
+      : '❌ Tum login nahi ho.\nLogin karo: login <user-id> <password>\n_(password DM me bhejna behtar hai — group me sab dekhte hain)_',
+    msg
+  );
+}
+
 // ─── Core: create the ledger entry (file buffer already in hand) ───
 // media: { kind: 'image'|'pdf', mimetype, filename }
 // Returns { ok:true, id, type, partyName, amount } on success, { ok:false } otherwise.
@@ -170,22 +236,23 @@ const UNDO_TTL_MS = 30 * 60 * 1000;
 // senderKey -> bills waiting their turn (one active bill per sender at a time)
 const mediaQueues = new Map();
 const MAX_QUEUE = 10;
-async function processBill(groupJid, msg, parsed, buffer, media, description, entryDate) {
+async function processBill(groupJid, msg, parsed, buffer, media, description, entryDate, senderKey) {
   const kind = media?.kind || 'image';
   const mimetype = media?.mimetype || 'image/jpeg';
   const filename = media?.filename || `bill_${Date.now()}.jpg`;
   const date = entryDate || todayPK();
   const desc = String(description || '').trim() || 'Added via WhatsApp';
+  const L = ledgerFor(senderKey); // logged-in user -> their own ledger; else shared admin
   let parties;
   try {
-    parties = await ledger.getParties();
+    parties = await L.getParties();
   } catch (e) {
     console.error('getParties fail:', e.message);
     await sendText(groupJid, '❌ Portal se connect nahi ho saka. Thodi der baad retry karo.', msg);
     return { ok: false };
   }
 
-  const party = ledger.findParty(parties, parsed.partyName);
+  const party = L.findParty(parties, parsed.partyName);
   if (!party) {
     await sendText(
       groupJid,
@@ -199,7 +266,7 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
     let entryId = null;
     let photoFailed = false; // receipt: bill photo Cloudinary upload failed (entry still saved)
     if (parsed.type === 'sale') {
-      const res = await ledger.createSale({
+      const res = await L.createSale({
         partyId: party.id,
         amount: parsed.amount,
         date,
@@ -217,7 +284,7 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
         photoFailed = true;
         console.error('receipt file upload fail:', e.message);
       }
-      const res = await ledger.createReceipt({
+      const res = await L.createReceipt({
         partyId: party.id,
         amount: parsed.amount,
         date,
@@ -226,11 +293,14 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
       entryId = res && res.id != null ? res.id : null;
     }
 
-    const balance = await ledger.getBalance(party.id).catch(() => null);
+    const balance = await L.getBalance(party.id).catch(() => null);
     const title = parsed.type === 'sale' ? '✅ *Sale Recorded*' : '✅ *Receipt Recorded*';
     const lines = [title, `🏪 Party: ${party.name}`, `💰 Amount: ${formatRs(parsed.amount)}`];
     if (desc !== 'Added via WhatsApp') lines.push(`📝 ${desc}`);
     if (date !== todayPK()) lines.push(`📅 Date: ${date}`);
+    const who = sessionUsername(senderKey);
+    if (who) lines.push(`👤 Ledger: ${who}`);
+    else lines.push('💡 Apne ledger me entry ke liye DM me login karo: login <user-id> <password>');
     if (photoFailed) {
       lines.push('⚠️ Bill ki photo upload nahi ho saki (Cloudinary) — entry save ho gayi hai.');
     }
@@ -355,18 +425,33 @@ async function startBot() {
         if (!msg.message || msg.key.fromMe) continue;
         if (isJidBroadcast(msg.key.remoteJid)) continue;
         const remoteJid = msg.key.remoteJid;
-        if (!remoteJid.endsWith('@g.us')) continue; // groups only, no DMs
-        if (!GROUP_NAME) continue;
+        const isGroup = remoteJid.endsWith('@g.us');
+        const isDM = !isGroup && String(remoteJid || '').endsWith('@s.whatsapp.net');
+        if (!isGroup && !isDM) continue;
         if (handledIds.has(msg.key.id)) continue;
 
-        const subject = await groupSubject(remoteJid);
-        if (subject !== GROUP_NAME) continue; // only the configured group
+        // DMs only support auth commands (login/logout/me) — bills stay group-only.
+        let subject = '';
+        if (isGroup) {
+          if (!GROUP_NAME) continue;
+          subject = await groupSubject(remoteJid);
+          if (subject !== GROUP_NAME) continue; // only the configured group
+        }
 
         const inner = unwrapMsg(msg.message);
         const img = inner.imageMessage;
         const doc = inner.documentMessage;
         const text = String(inner.conversation || inner.extendedTextMessage?.text || '').trim();
         const senderKey = msg.key.participant || msg.pushName || remoteJid;
+
+        // ── staff auth: login <user-id> <password> / logout / me (group + DM) ──
+        const authCmd = parseAuthCommand(text);
+        if (authCmd) {
+          handledIds.add(msg.key.id);
+          await handleAuthCommand({ remoteJid, senderKey, authCmd, msg, isDM });
+          continue;
+        }
+        if (!isGroup) continue; // bills, undo etc. are group-only
 
         // bill media = photo, or a PDF document
         const docMime = String(doc?.mimetype || '').toLowerCase();
@@ -392,7 +477,7 @@ async function startBot() {
         // ── helper: fetch parties or bail out with an error message ──
         async function needParties() {
           try {
-            return await ledger.getParties();
+            return await ledgerFor(senderKey).getParties();
           } catch (e) {
             console.error('getParties fail:', e.message);
             await sendText(remoteJid, '❌ Portal se connect nahi ho saka. Thodi der baad retry karo.', msg);
@@ -403,7 +488,7 @@ async function startBot() {
         // ── helper: duplicate detection (same party + type + amount + date, last 3h) ──
         async function findDuplicate(partyId, entryType, amount, entryDate) {
           try {
-            const recent = await ledger.getRecentEntries(partyId, 180);
+            const recent = await ledgerFor(senderKey).getRecentEntries(partyId, 180);
             return (
               recent.find(
                 (e) =>
@@ -435,7 +520,7 @@ async function startBot() {
             `👉 creating ${s.entryType}: ${s.partyName} ${s.amount} date=${s.entryDate}` +
               (s.description ? ` desc=${s.description.slice(0, 40)}` : '')
           );
-          const res = await processBill(remoteJid, msg, parsed, s.media.buffer, s.media, s.description, s.entryDate);
+          const res = await processBill(remoteJid, msg, parsed, s.media.buffer, s.media, s.description, s.entryDate, senderKey);
           trackLastEntry(senderKey, res);
           await advanceQueue(); // start the next queued bill, if any
         }
@@ -462,7 +547,7 @@ async function startBot() {
             console.log(`📩 bill ${item.kind} in "${subject}": caption="${item.caption.slice(0, 80)}"`);
             const parties = await needParties();
             const today = todayPK();
-            const party = parties ? ledger.findParty(parties, parsed.partyName) : null;
+            const party = parties ? ledgerFor(senderKey).findParty(parties, parsed.partyName) : null;
             const dup = party ? await findDuplicate(party.id, parsed.type, parsed.amount, today) : null;
             if (dup) {
               // duplicate suspected → ask instead of creating instantly
@@ -474,7 +559,7 @@ async function startBot() {
               console.log(`⚠️ duplicate suspected (caption shortcut): ${party.name} ${parsed.amount}`);
               await sendText(remoteJid, dupPrompt(party.name, parsed.type, parsed.amount, today), msg);
             } else {
-              const res = await processBill(remoteJid, msg, parsed, item.buffer, item);
+              const res = await processBill(remoteJid, msg, parsed, item.buffer, item, undefined, undefined, senderKey);
               trackLastEntry(senderKey, res);
             }
             return;
@@ -546,7 +631,7 @@ async function startBot() {
             continue;
           }
           try {
-            await ledger.deleteEntry(last.type, last.id);
+            await ledgerFor(senderKey).deleteEntry(last.type, last.id);
             lastEntries.delete(senderKey);
             const typeLabel = last.type === 'sale' ? 'Sales' : 'Receipt';
             await sendText(remoteJid, `🗑️ *Entry deleted:*\n🏪 ${last.partyName}\n💰 ${formatRs(last.amount)} (${typeLabel})`, msg);
@@ -588,7 +673,7 @@ async function startBot() {
             const s = convos.get(senderKey);
             const parties = await needParties();
             const today = todayPK();
-            const party = parties ? ledger.findParty(parties, shortcut.partyName) : null;
+            const party = parties ? ledgerFor(senderKey).findParty(parties, shortcut.partyName) : null;
             const dup = party ? await findDuplicate(party.id, shortcut.type, shortcut.amount, today) : null;
             if (dup) {
               convos.setStep(senderKey, STEPS.CONFIRM, {
@@ -600,7 +685,7 @@ async function startBot() {
             } else {
               convos.clear(senderKey);
               console.log(`📩 caption shortcut in "${subject}": "${text.slice(0, 80)}"`);
-              const res = await processBill(remoteJid, msg, shortcut, s.media.buffer, s.media);
+              const res = await processBill(remoteJid, msg, shortcut, s.media.buffer, s.media, undefined, undefined, senderKey);
               trackLastEntry(senderKey, res);
             }
             continue;

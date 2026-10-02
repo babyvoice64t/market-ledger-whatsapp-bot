@@ -1,23 +1,40 @@
 // Market Ledger API client (talks to the Pages Functions backend).
-// Auth: POST /api/login {password} -> {ok:true, token}; token is cached and
-// refreshed when expired or when the API answers 401.
+// Auth (shared/admin): POST /api/login {password} -> {ok:true, token}; token is
+// cached and refreshed when expired or when the API answers 401.
+// Auth (per-user): POST /api/auth/login {username, password} -> {ok:true, token} —
+// see createUserLedgerClient below.
 
-export function createLedgerClient({ baseUrl, password, fetchImpl = fetch }) {
+function parseTokenExp(token) {
+  const exp = parseInt(String(token).split('.')[0], 10);
+  return Number.isFinite(exp) ? exp : Date.now() + 12 * 3600 * 1000;
+}
+
+function loginError(r, j, fallback) {
+  const err = new Error((j && j.error) || fallback);
+  err.status = r.status;
+  err.body = j;
+  return err;
+}
+
+export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, loginFn = null }) {
   const base = String(baseUrl || '').replace(/\/+$/, '');
   let token = null;
   let tokenExp = 0;
 
-  async function login() {
+  const doLogin = loginFn || (async () => {
     const r = await fetchImpl(`${base}/api/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password }),
     });
     const j = await r.json().catch(() => ({}));
-    if (!r.ok || !j.ok || !j.token) throw new Error('ledger login failed');
-    token = j.token;
-    const exp = parseInt(String(j.token).split('.')[0], 10);
-    tokenExp = Number.isFinite(exp) ? exp : Date.now() + 12 * 3600 * 1000;
+    if (!r.ok || !j.ok || !j.token) throw loginError(r, j, 'ledger login failed');
+    return j.token;
+  });
+
+  async function login() {
+    token = await doLogin();
+    tokenExp = parseTokenExp(token);
     return token;
   }
 
@@ -128,4 +145,28 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch }) {
     getRecentEntries,
     deleteEntry,
   };
+}
+
+// Per-user client: logs in via POST /api/auth/login {username, password}.
+// The token is scoped to that user (per-user isolation): parties, entries,
+// balances — everything done with this client lands in the user's own ledger.
+// The token auto-refreshes using the stored credentials (kept in memory only,
+// never logged). If the password changes server-side, login fails with 401 and
+// the caller should ask the user to log in again.
+export function createUserLedgerClient({ baseUrl, username, password, fetchImpl = fetch }) {
+  const base = String(baseUrl || '').replace(/\/+$/, '');
+  return createLedgerClient({
+    baseUrl: base,
+    fetchImpl,
+    loginFn: async () => {
+      const r = await fetchImpl(`${base}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok || !j.token) throw loginError(r, j, 'login failed');
+      return j.token;
+    },
+  });
 }

@@ -21,6 +21,16 @@ and replies with a formatted bill card.
 
 **`undo`** — akhri 30 min me bot se bani entry delete karne ke liye `undo` likho (koi active session na ho).
 
+## Staff login (apna ledger)
+
+Har staff member apni **user ID + password** se login kare to uski entries **sirf uske apne ledger** me jayengi (portal/app me wahi dikhengi):
+
+- `login <user-id> <password>` — login (group me ya **DM me** — DM behtar hai, group me password sab dekhte hain)
+- `logout` — logout
+- `me` — dekho kis naam se login ho
+
+Login ke baghair bheji gayi entries pehle jaisi **admin/shared** ledger me jati hain. Bill card me `👤 Ledger: <user>` likha aata hai jab login ho, warna login ka hint.
+
 **Ek saath kayi bills** — 4-5 photos/PDF ek saath bhej do to koi bill zaya nahi hogi: pehli bill ka flow chalega, baqi **queue** me lag jayengi (#1, #2…) aur ek-ek karke khud hi poochi jayengi. `cancel` = sirf current bill cancel (+ agli queued bill shuru), `cancel all` = sab kuch clear.
 
 **Cloudinary fail ho jaye to:**

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createLedgerClient } from '../ledger.js';
+import { createLedgerClient, createUserLedgerClient } from '../ledger.js';
 
 // NOTE: no real LEDGER_PASSWORD anywhere here — dummy only, no production writes.
 
@@ -146,10 +146,14 @@ test('getBalance returns totals.balance', async () => {
   assert.equal(await c.getBalance(1), 30000);
 });
 
-test('login failure throws', async () => {
+test('login failure surfaces server error with status', async () => {
   const f = mockFetch([{ match: isLogin, status: 401, json: { error: 'Wrong password' } }]);
   const c = createLedgerClient({ baseUrl: 'https://x.test', password: 'wrong', fetchImpl: f });
-  await assert.rejects(() => c.ensureToken(), /ledger login failed/);
+  await assert.rejects(() => c.ensureToken(), (e) => {
+    assert.equal(e.status, 401);
+    assert.match(e.message, /Wrong password/);
+    return true;
+  });
 });
 
 test('getRecentEntries hits /api/entries/recent with party_id and minutes', async () => {
@@ -187,4 +191,66 @@ test('deleteEntry throws on missing entry', async () => {
   ]);
   const c = createLedgerClient({ baseUrl: 'https://x.test', password: 'dummy', fetchImpl: f });
   await assert.rejects(() => c.deleteEntry('sale', 999), /Sale not found/);
+});
+
+test('createUserLedgerClient logs in via /api/auth/login {username,password}', async () => {
+  let seenBody = null;
+  const token = `${Date.now() + 3600000}.user.ali123.abc`;
+  const f = mockFetch([
+    {
+      match: (url, opts) => {
+        if (url.includes('/api/auth/login') && opts.method === 'POST') {
+          seenBody = JSON.parse(opts.body); return true;
+        }
+        return false;
+      },
+      status: 200, json: { ok: true, token, role: 'user', username: 'ali123' },
+    },
+    {
+      match: (url) => url.includes('/api/parties'),
+      status: 200, json: { parties: [{ id: 5, name: 'My Party' }] },
+    },
+  ]);
+  const c = createUserLedgerClient({ baseUrl: 'https://x.test', username: 'ali123', password: 'pw1', fetchImpl: f });
+  const parties = await c.getParties();
+  assert.deepEqual(parties, [{ id: 5, name: 'My Party' }]);
+  assert.deepEqual(seenBody, { username: 'ali123', password: 'pw1' });
+  // user token must travel as the password param (backend verifies both kinds)
+  const partiesCall = f.calls.find((x) => x.url.includes('/api/parties'));
+  assert.ok(partiesCall.url.includes(`password=${encodeURIComponent(token)}`));
+});
+
+test('createUserLedgerClient caches the user token', async () => {
+  let logins = 0;
+  const f = mockFetch([
+    {
+      match: (url) => url.includes('/api/auth/login'),
+      status: 200, json: () => ({ ok: true, token: `${Date.now() + 3600000}.user.ali123.t${++logins}` }),
+    },
+  ]);
+  const c = createUserLedgerClient({ baseUrl: 'https://x.test', username: 'ali123', password: 'pw1', fetchImpl: f });
+  const t1 = await c.ensureToken();
+  const t2 = await c.ensureToken();
+  assert.equal(t1, t2);
+  assert.equal(logins, 1);
+});
+
+test('user login failure carries HTTP status (401 wrong password)', async () => {
+  const f = mockFetch([
+    { match: (url) => url.includes('/api/auth/login'), status: 401, json: { error: 'Wrong user ID or password.' } },
+  ]);
+  const c = createUserLedgerClient({ baseUrl: 'https://x.test', username: 'ali123', password: 'bad', fetchImpl: f });
+  await assert.rejects(() => c.ensureToken(), (e) => {
+    assert.equal(e.status, 401);
+    assert.match(e.message, /Wrong user ID or password/);
+    return true;
+  });
+});
+
+test('user login blocked account carries 403', async () => {
+  const f = mockFetch([
+    { match: (url) => url.includes('/api/auth/login'), status: 403, json: { error: 'This account has been blocked. Contact your admin.' } },
+  ]);
+  const c = createUserLedgerClient({ baseUrl: 'https://x.test', username: 'ali123', password: 'pw1', fetchImpl: f });
+  await assert.rejects(() => c.ensureToken(), (e) => e.status === 403);
 });
