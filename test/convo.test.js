@@ -98,9 +98,9 @@ test('formatPartyList: numbered list', () => {
 });
 
 test('parseAmountAndDescription: amount + description on next lines', () => {
-  assert.deepEqual(parseAmountAndDescription('5000\nInv#0988 imran ali'), {
+  assert.deepEqual(parseAmountAndDescription('5000\nInv#0988'), {
     amount: 5000,
-    description: 'Inv#0988 imran ali',
+    description: 'Inv#0988',
   });
   assert.deepEqual(parseAmountAndDescription('50000'), { amount: 50000, description: '' });
   assert.deepEqual(parseAmountAndDescription('Rs 12,500.50\nnote here'), {
@@ -143,7 +143,8 @@ test('parseDateInput: rejects invalid and future dates', () => {
   assert.equal(parseDateInput('aaj', 'not-a-date'), null);
 });
 
-test('STEPS has date and confirm steps', () => {
+test('STEPS has description, date and confirm steps', () => {
+  assert.equal(STEPS.DESCRIPTION, 'description');
   assert.equal(STEPS.DATE, 'date');
   assert.equal(STEPS.CONFIRM, 'confirm');
 });

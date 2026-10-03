@@ -768,21 +768,46 @@ async function startBot() {
           convos.setStep(senderKey, STEPS.AMOUNT, { entryType });
           const label = entryType === 'sale' ? '💰 Sales' : '🧾 Receipt';
           console.log(`👉 type chosen: ${entryType}`);
-          await sendText(remoteJid, `✅ ${label}\n\n🔢 Ab *amount* send karo — first line me sirf amount, neeche description bhi likh sakte ho (optional):\n\n5000\nInv#0988 imran ali\n\n❌ Cancel ke liye "cancel" likho`, msg);
+          await sendText(remoteJid, `✅ ${label}\n\n🔢 Ab *amount* send karo (misal: 5000):\n\n❌ Cancel ke liye "cancel" likho`, msg);
           continue;
         }
 
         if (sess.step === STEPS.AMOUNT) {
           const { amount, description } = parseAmountAndDescription(text);
           if (amount === null) {
-            await sendText(remoteJid, '❌ First line me sahi amount likho (misal: 50000). Description next line me likho.', msg);
+            await sendText(remoteJid, '❌ Sahi amount likho (misal: 50000).', msg);
             continue;
           }
-          convos.setStep(senderKey, STEPS.DATE, { amount, description });
-          console.log(`👉 amount entered: ${amount}${description ? ` | desc: ${description.slice(0, 40)}` : ''} — asking date`);
+          if (description) {
+            // amount ke saath description bhi bhej di — seedha date pe jao
+            convos.setStep(senderKey, STEPS.DATE, { amount, description });
+            console.log(`👉 amount entered: ${amount} | desc: ${description.slice(0, 40)} — asking date`);
+            await sendText(
+              remoteJid,
+              `✅ Amount: ${formatRs(amount)}\n📝 ${description}\n\n📅 Bill ki *date* kya hai?\n*today* likho, ya custom date likho (misal: 28-09-2026):\n\n❌ Cancel ke liye "cancel" likho`,
+              msg
+            );
+            continue;
+          }
+          convos.setStep(senderKey, STEPS.DESCRIPTION, { amount });
+          console.log(`👉 amount entered: ${amount} — asking description`);
           await sendText(
             remoteJid,
-            `✅ Amount: ${formatRs(amount)}${description ? `\n📝 ${description}` : ''}\n\n📅 Bill ki *date* kya hai?\n*today* likho, ya custom date likho (misal: 28-09-2026):\n\n❌ Cancel ke liye "cancel" likho`,
+            `✅ Amount: ${formatRs(amount)}\n\n📝 Ab *description* likho (optional hai):\n\nSkip karne ke liye "skip" likho.\n\n❌ Cancel ke liye "cancel" likho`,
+            msg
+          );
+          continue;
+        }
+
+        if (sess.step === STEPS.DESCRIPTION) {
+          const skipWords = new Set(['skip', '-', 'nahi', 'nahin', 'no', 'n']);
+          const description = skipWords.has(text.trim().toLowerCase()) ? '' : text.trim().slice(0, 500);
+          convos.setStep(senderKey, STEPS.DATE, { description });
+          const s = convos.get(senderKey);
+          console.log(`👉 description entered: ${description ? description.slice(0, 40) : '(skipped)'} — asking date`);
+          await sendText(
+            remoteJid,
+            `✅ Amount: ${formatRs(s.amount)}${description ? `\n📝 ${description}` : ''}\n\n📅 Bill ki *date* kya hai?\n*today* likho, ya custom date likho (misal: 28-09-2026):\n\n❌ Cancel ke liye "cancel" likho`,
             msg
           );
           continue;

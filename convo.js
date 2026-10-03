@@ -2,7 +2,8 @@
 //
 // New flow: user sends a bill photo/PDF (no caption needed) → bot asks for
 // party (numbered list) → bot asks type (1=Sales, 2=Receipt) → bot asks amount
-// → entry is created. One active session per sender; sessions expire after TTL.
+// → bot asks description (separate step, optional — "skip" to skip) → bot asks
+// date → entry is created. One active session per sender; sessions expire after TTL.
 
 export const CONVO_TTL_MS = 10 * 60 * 1000; // 10 minutes to finish the steps
 
@@ -10,12 +11,13 @@ export const STEPS = {
   PARTY: 'party',
   TYPE: 'type',
   AMOUNT: 'amount',
+  DESCRIPTION: 'description',
   DATE: 'date',
   CONFIRM: 'confirm',
 };
 
 export function createConvoStore(ttlMs = CONVO_TTL_MS) {
-  const map = new Map(); // sessionKey -> { step, media, partyId, partyName, entryType, at }
+  const map = new Map(); // sessionKey -> { step, media, partyId, partyName, entryType, amount, description, entryDate, at }
 
   function get(key) {
     const s = map.get(key);
@@ -94,9 +96,9 @@ function parseAmountLine(line) {
   return parseAmount(line);
 }
 
-// "5000\nInv#0988 imran ali" -> { amount: 5000, description: "Inv#0988 imran ali" }
-// "50000"                   -> { amount: 50000, description: "" }
-// "abc" / ""                -> { amount: null, description: "" }
+// "5000\nInv#0988" -> { amount: 5000, description: "Inv#0988" }
+// "50000"          -> { amount: 50000, description: "" }
+// "abc" / ""       -> { amount: null, description: "" }
 export function parseAmountAndDescription(text) {
   const lines = String(text || '')
     .split('\n')
