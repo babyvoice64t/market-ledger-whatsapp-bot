@@ -94,6 +94,22 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, login
     return j;
   }
 
+  // Purchases need the bill file (backend uploads it to Cloudinary), same as sales.
+  async function createPurchase({ partyId, amount, date, description, photoBuffer, filename, mimetype }) {
+    const t = await ensureToken();
+    const form = new FormData();
+    form.append('password', t);
+    form.append('party_id', String(partyId));
+    form.append('amount', String(amount));
+    form.append('date', date);
+    if (description) form.append('description', description);
+    form.append('photo', new Blob([photoBuffer], { type: mimetype || 'image/jpeg' }), filename || 'bill.jpg');
+    const r = await fetchImpl(base + '/api/purchases', { method: 'POST', body: form });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) throw new Error(j.error || 'purchase request failed');
+    return j;
+  }
+
   async function createReceipt({ partyId, amount, date, description }) {
     const t = await ensureToken();
     const r = await fetchImpl(`${base}/api/receipts`, {
@@ -119,7 +135,7 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, login
 
   async function deleteEntry(entryType, id) {
     const t = await ensureToken();
-    const path = entryType === 'sale' ? `/api/sales/${id}` : `/api/receipts/${id}`;
+    const path = entryType === 'sale' ? `/api/sales/${id}` : entryType === 'purchase' ? `/api/purchases/${id}` : `/api/receipts/${id}`;
     const r = await fetchImpl(withToken(path, t), { method: 'DELETE' });
     if (r.status === 401) {
       token = null;
@@ -141,6 +157,7 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, login
     findParty,
     getBalance,
     createSale,
+    createPurchase,
     createReceipt,
     getRecentEntries,
     deleteEntry,

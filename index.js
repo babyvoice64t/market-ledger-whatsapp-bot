@@ -315,8 +315,9 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
   try {
     let entryId = null;
     let photoFailed = false; // receipt: bill photo Cloudinary upload failed (entry still saved)
-    if (parsed.type === 'sale') {
-      const res = await L.createSale({
+    if (parsed.type === 'sale' || parsed.type === 'purchase') {
+      const createFn = parsed.type === 'sale' ? L.createSale : L.createPurchase;
+      const res = await createFn({
         partyId: party.id,
         amount: parsed.amount,
         date,
@@ -344,7 +345,7 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
     }
 
     const balance = await L.getBalance(party.id).catch(() => null);
-    const title = parsed.type === 'sale' ? '✅ *Sale Recorded*' : '✅ *Receipt Recorded*';
+    const title = parsed.type === 'sale' ? '✅ *Sale Recorded*' : parsed.type === 'purchase' ? '✅ *Purchase Recorded*' : '✅ *Receipt Recorded*';
     const lines = [title, `🏪 Party: ${party.name}`, `💰 Amount: ${formatRs(parsed.amount)}`];
     if (desc !== 'Added via WhatsApp') lines.push(`📝 ${desc}`);
     if (date !== todayPK()) lines.push(`📅 Date: ${date}`);
@@ -557,7 +558,7 @@ async function startBot() {
         }
 
         function dupPrompt(partyName, entryType, amount, entryDate) {
-          const typeLabel = entryType === 'sale' ? '💰 Sales' : '🧾 Receipt';
+          const typeLabel = entryType === 'sale' ? '💰 Sales' : entryType === 'purchase' ? '🛒 Purchase' : '🧾 Receipt';
           return (
             `⚠️ *Lagta hai ye entry already save ho chuki hai:*\n` +
             `🏪 Party: ${partyName}\n${typeLabel}: ${formatRs(amount)}\n📅 Date: ${entryDate}\n\n` +
@@ -753,7 +754,7 @@ async function startBot() {
           const party = parties[n - 1];
           convos.setStep(senderKey, STEPS.TYPE, { partyId: party.id, partyName: party.name });
           console.log(`👉 party chosen: ${party.name}`);
-          await sendText(remoteJid, `🏪 Party: *${party.name}*\n\nEntry type select karo:\n1. 💰 Sales\n2. 🧾 Receipt\n\n❌ Cancel ke liye "cancel" likho`, msg);
+          await sendText(remoteJid, `🏪 Party: *${party.name}*\n\nEntry type select karo:\n1. 💰 Sales\n2. 🧾 Receipt\n3. 🛒 Purchase\n\n❌ Cancel ke liye "cancel" likho`, msg);
           continue;
         }
 
@@ -761,12 +762,13 @@ async function startBot() {
           let entryType = null;
           if (low === '1' || low === 'sales' || low === 'sale') entryType = 'sale';
           else if (low === '2' || low === 'receipt' || low === 'receipts') entryType = 'receipt';
+          else if (low === '3' || low === 'purchase' || low === 'purchases' || low === 'kharid') entryType = 'purchase';
           if (!entryType) {
-            await sendText(remoteJid, '❌ Sales ke liye "1", Receipt ke liye "2" send karo.', msg);
+            await sendText(remoteJid, '❌ Sales ke liye "1", Receipt ke liye "2", Purchase ke liye "3" send karo.', msg);
             continue;
           }
           convos.setStep(senderKey, STEPS.AMOUNT, { entryType });
-          const label = entryType === 'sale' ? '💰 Sales' : '🧾 Receipt';
+          const label = entryType === 'sale' ? '💰 Sales' : entryType === 'purchase' ? '🛒 Purchase' : '🧾 Receipt';
           console.log(`👉 type chosen: ${entryType}`);
           await sendText(remoteJid, `✅ ${label}\n\n🔢 Ab *amount* send karo (misal: 5000):\n\n❌ Cancel ke liye "cancel" likho`, msg);
           continue;
