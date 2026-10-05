@@ -3,8 +3,9 @@
 // Examples: "Ahmed Traders sales 50000", "ABC Co receipt 12,500.50", "Steel Co purchase 80000"
 
 const SALE_KEYS = new Set(['sale', 'sales']);
-const RECEIPT_KEYS = new Set(['receipt', 'receipts', 'payment', 'paid', 'received']);
+const RECEIPT_KEYS = new Set(['receipt', 'receipts', 'received', 'wasooli']);
 const PURCHASE_KEYS = new Set(['purchase', 'purchases', 'kharid']);
+const PAYMENT_KEYS = new Set(['payment', 'payments', 'paid', 'adaigi']);
 
 export function parseCaption(caption) {
   const fail = (reason) => ({ ok: false, reason });
@@ -21,6 +22,7 @@ export function parseCaption(caption) {
   if (SALE_KEYS.has(typeRaw)) type = 'sale';
   else if (RECEIPT_KEYS.has(typeRaw)) type = 'receipt';
   else if (PURCHASE_KEYS.has(typeRaw)) type = 'purchase';
+  else if (PAYMENT_KEYS.has(typeRaw)) type = 'payment';
   else return fail('bad_type');
 
   const partyName = tokens.slice(0, -2).join(' ').trim();
@@ -41,4 +43,4 @@ export function formatRs(n) {
 export const USAGE_TEXT =
   '📸 Bill ki *photo ya PDF* bhejo — phir main khud poochhunga:\n' +
   '1️⃣ Party ka number\n2️⃣ Sales ya Receipt\n3️⃣ Amount\n\n' +
-  'Shortcut: photo ke saath caption "<party name> sales|receipt|purchase <amount>" bhi chalega.';
+  'Shortcut: photo ke saath caption "<party name> sales|receipt|purchase|payment <amount>" bhi chalega.';

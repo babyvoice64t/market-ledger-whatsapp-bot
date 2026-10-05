@@ -110,6 +110,33 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, login
     return j;
   }
 
+  async function createPayment({ partyId, amount, date, description, photoBuffer, filename, mimetype }) {
+    const t = await ensureToken();
+    // photo optional: agar hai to pehle Cloudinary pe upload karo (receipt wala flow)
+    let photoUrl = '';
+    if (photoBuffer) {
+      const form = new FormData();
+      form.append('password', t);
+      form.append('party_id', String(partyId));
+      form.append('amount', String(amount));
+      form.append('date', date);
+      if (description) form.append('description', description);
+      form.append('photo', new Blob([photoBuffer], { type: mimetype || 'image/jpeg' }), filename || 'payment.jpg');
+      const r = await fetchImpl(base + '/api/payments', { method: 'POST', body: form });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || 'payment request failed');
+      return j;
+    }
+    const r = await fetchImpl(base + '/api/payments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: t, party_id: partyId, amount, date, description }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) throw new Error(j.error || 'payment request failed');
+    return j;
+  }
+
   async function createReceipt({ partyId, amount, date, description }) {
     const t = await ensureToken();
     const r = await fetchImpl(`${base}/api/receipts`, {
@@ -158,6 +185,7 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, login
     getBalance,
     createSale,
     createPurchase,
+    createPayment,
     createReceipt,
     getRecentEntries,
     deleteEntry,
