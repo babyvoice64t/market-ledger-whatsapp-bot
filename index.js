@@ -211,9 +211,9 @@ function todayPK() {
 // ─── DM promo reply (no functionality in personal chat) ───
 const PROMO_TEXT = (
   '🤖 *Live Tech — Automation & Software*\n\n' +
-  'Assalam-o-Alaikum! Main WhatsApp automation bot hun.\n\n' +
-  'Hum businesses ke liye automation aur custom software banate hain — ' +
-  'WhatsApp bots, ledger systems aur bohat kuch.\n\n' +
+  'Hello! I am a WhatsApp automation bot.\n\n' +
+  'We build automation and custom software for businesses — ' +
+  'WhatsApp bots, ledger systems and much more.\n\n' +
   '📞 Contact: 0317-3291218'
 );
 
@@ -239,10 +239,10 @@ async function handleActivate({ remoteJid, msg, username, password }) {
     await check.ensureToken();
   } catch (e) {
     console.log(`🔐 activate: credential check failed for "${username}" (status=${e.status || '?'})`);
-    if (e.status === 401) await sendText(remoteJid, '❌ Ghalat user ID ya password.', msg);
-    else if (e.status === 403) await sendText(remoteJid, '⛔ Ye account block hai. Admin se rabta karo.', msg);
-    else if (e.status === 429) await sendText(remoteJid, '⏳ Bohat sari koshishen — thodi der baad try karo.', msg);
-    else await sendText(remoteJid, `❌ Activate nahi ho saka: ${e.message || 'unknown error'}`, msg);
+    if (e.status === 401) await sendText(remoteJid, '❌ Wrong user ID or password.', msg);
+    else if (e.status === 403) await sendText(remoteJid, '⛔ This account is blocked. Contact the admin.', msg);
+    else if (e.status === 429) await sendText(remoteJid, '⏳ Too many attempts — try again in a bit.', msg);
+    else await sendText(remoteJid, `❌ Could not activate: ${e.message || 'unknown error'}`, msg);
     return;
   }
   let subject = '';
@@ -257,22 +257,22 @@ async function handleActivate({ remoteJid, msg, username, password }) {
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) {
       if (r.status === 409) {
-        await sendText(remoteJid, '❌ Ye ID pehle se kisi aur group me active hai.\nEk ID sirf ek group me chal sakti hai.', msg);
+        await sendText(remoteJid, '❌ This ID is already active in another group.\nOne ID works in only one group.', msg);
       } else {
-        await sendText(remoteJid, `❌ Activate nahi ho saka: ${j.error || 'unknown error'}`, msg);
+        await sendText(remoteJid, `❌ Could not activate: ${j.error || 'unknown error'}`, msg);
       }
       return;
     }
   } catch (e) {
     console.error('activate bind fail:', e.message);
-    await sendText(remoteJid, `❌ Activate nahi ho saka: ${e.message}`, msg);
+    await sendText(remoteJid, `❌ Could not activate: ${e.message}`, msg);
     return;
   }
   groupBindings.set(remoteJid, { client: userClientFor(username), username, name: subject });
   console.log(`✅ group activated: "${subject}" -> ${username}`);
   await sendText(
     remoteJid,
-    `✅ *Activated!*\n👤 User: *${username}*\nAb is group ke bills *tumhare ledger* me jayenge.\n\n🔒 Apna activate wala message khud delete kar do (long press → delete) taake password kisi ko nazar na aaye.`,
+    `✅ *Activated!*\n👤 User: *${username}*\nBills in this group will now go to *your ledger*.\n\n🔒 Delete your activate message yourself (long press → delete) so no one sees your password.`,
     msg
   );
 }
@@ -298,7 +298,7 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
     parties = await L.getParties();
   } catch (e) {
     console.error('getParties fail:', e.message);
-    await sendText(groupJid, '❌ Portal se connect nahi ho saka. Thodi der baad retry karo.', msg);
+    await sendText(groupJid, '❌ Could not connect to the portal. Retry in a bit.', msg);
     return { ok: false };
   }
 
@@ -306,7 +306,7 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
   if (!party) {
     await sendText(
       groupJid,
-      `⚠️ Party "*${parsed.partyName}*" portal me add nahi hai. Pehle portal me add karo: ${LEDGER_URL}/`,
+      `⚠️ Party "*${parsed.partyName}*" is not in the portal. Add it in the portal first: ${LEDGER_URL}/`,
       msg
     );
     return { ok: false };
@@ -350,7 +350,7 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
     if (desc !== 'Added via WhatsApp') lines.push(`📝 ${desc}`);
     if (date !== todayPK()) lines.push(`📅 Date: ${date}`);
     if (photoFailed) {
-      lines.push('⚠️ Bill ki photo upload nahi ho saki (Cloudinary) — entry save ho gayi hai.');
+      lines.push('⚠️ Bill photo upload failed (Cloudinary) — entry was still saved.');
     }
     if (balance !== null) lines.push(`📊 Balance: ${formatRs(balance)}`);
     const caption = lines.join('\n');
@@ -372,11 +372,11 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
       // Cloudinary throttling: sale needs its bill photo, so nothing was saved.
       await sendText(
         groupJid,
-        '⏳ *Cloudinary ki limit lag gayi* — photo upload nahi hua, *entry save NAHI hui*.\n5-10 min baad bill dobara send karo.',
+        '⏳ *Cloudinary rate limit hit* — photo not uploaded, *entry NOT saved*.\nSend the bill again in 5-10 min.',
         msg
       );
     } else {
-      await sendText(groupJid, `❌ Entry save nahi ho saki: ${errText}`, msg);
+      await sendText(groupJid, `❌ Could not save entry: ${errText}`, msg);
     }
     return { ok: false };
   }
@@ -498,7 +498,7 @@ async function startBot() {
           if (act) {
             handledIds.add(msg.key.id);
             if (act.usage) {
-              await sendText(remoteJid, 'Activate karne ke liye likho:\n`activate <user-id> <password>`', msg);
+              await sendText(remoteJid, 'To activate, type:\n`activate <user-id> <password>`', msg);
             } else {
               await handleActivate({ remoteJid, msg, username: act.username, password: act.password });
             }
@@ -512,7 +512,7 @@ async function startBot() {
         const isPdf = !!doc && (docMime === 'application/pdf' || /\.pdf$/i.test(doc.fileName || ''));
         if (doc && !isPdf) {
           handledIds.add(msg.key.id);
-          await sendText(remoteJid, '❌ Sirf *photo* ya *PDF* send karo. Other files supported nahi hain.', msg);
+          await sendText(remoteJid, '❌ Send only a *photo* or *PDF*. Other files are not supported.', msg);
           continue;
         }
         const media = img
@@ -534,7 +534,7 @@ async function startBot() {
             return await client.getParties();
           } catch (e) {
             console.error('getParties fail:', e.message);
-            await sendText(remoteJid, '❌ Portal se connect nahi ho saka. Thodi der baad retry karo.', msg);
+            await sendText(remoteJid, '❌ Could not connect to the portal. Retry in a bit.', msg);
             return null;
           }
         }
@@ -560,9 +560,9 @@ async function startBot() {
         function dupPrompt(partyName, entryType, amount, entryDate) {
           const typeLabel = entryType === 'sale' ? '💰 Sales' : entryType === 'purchase' ? '🛒 Purchase' : entryType === 'payment' ? '💸 Payment' : '🧾 Receipt';
           return (
-            `⚠️ *Lagta hai ye entry already save ho chuki hai:*\n` +
+            `⚠️ *This entry may already be saved:*\n` +
             `🏪 Party: ${partyName}\n${typeLabel}: ${formatRs(amount)}\n📅 Date: ${entryDate}\n\n` +
-            `Phir bhi save karun? *haan* / *nahi*`
+            `Save anyway? *yes* / *no*`
           );
         }
 
@@ -581,8 +581,8 @@ async function startBot() {
 
         function partyListPrompt(parties) {
           const shown = parties.slice(0, 50);
-          const extra = parties.length > 50 ? `\n…aur ${parties.length - 50} parties (pehli 50 dikhayi hain)` : '';
-          return `🏪 Party select karo — *number* send karo:\n${formatPartyList(shown)}${extra}\n\n❌ Cancel ke liye "cancel" likho`;
+          const extra = parties.length > 50 ? `\n…plus ${parties.length - 50} more parties (showing first 50)` : '';
+          return `🏪 Select a party — send the *number*:\n${formatPartyList(shown)}${extra}\n\n❌ Type "cancel" to cancel`;
         }
 
         // ── bill queue: one active bill per sender, the rest wait their turn ──
@@ -622,7 +622,7 @@ async function startBot() {
           const parties = await needParties();
           if (!parties) { return; }
           if (!parties.length) {
-            await sendText(remoteJid, `⚠️ Portal me koi party add nahi hai. Pehle portal me party add karo: ${LEDGER_URL}/`, msg);
+            await sendText(remoteJid, `⚠️ No parties in the portal yet. Add a party in the portal first: ${LEDGER_URL}/`, msg);
             return;
           }
           convos.start(senderKey, { buffer: item.buffer, mimetype: item.mimetype, filename: item.filename, kind: item.kind });
@@ -649,7 +649,7 @@ async function startBot() {
             buffer = await downloadMediaMessage(msg, 'buffer', {});
           } catch (e) {
             console.error('download fail:', e.message);
-            await sendText(remoteJid, '❌ File download nahi ho saki. Dobara send karo.', msg);
+            await sendText(remoteJid, '❌ File download failed. Send it again.', msg);
             continue;
           }
           const item = { buffer, mimetype: media.mimetype, filename: media.filename, kind: media.kind, caption: media.caption };
@@ -657,12 +657,12 @@ async function startBot() {
             // busy with another bill → queue this one, it starts automatically later
             const q = getBillQueue();
             if (q.length >= MAX_QUEUE) {
-              await sendText(remoteJid, `⚠️ Queue full hai (${MAX_QUEUE} bills). Pehli entries complete hone do, phir send karo.`, msg);
+              await sendText(remoteJid, `⚠️ Queue is full (${MAX_QUEUE} bills). Let the first entries finish, then send.`, msg);
               continue;
             }
             q.push(item);
             console.log(`📸 bill queued at #${q.length}`);
-            await sendText(remoteJid, `📸 Bill received — queue me laga di (#${q.length}).\nPehli entry complete hote hi iska poochunga 👆`, msg);
+            await sendText(remoteJid, `📸 Bill received — queued (#${q.length}).\nI will ask about it as soon as the first entry is done 👆`, msg);
             continue;
           }
           const waiting = mediaQueues.get(senderKey);
@@ -681,18 +681,18 @@ async function startBot() {
         if (['undo', 'undo karo'].includes(text.toLowerCase().trim()) && !convos.get(senderKey)) {
           const last = lastEntries.get(senderKey);
           if (!last || Date.now() - last.at > UNDO_TTL_MS) {
-            await sendText(remoteJid, '❓ Undo ke liye koi recent entry nahi mili.\n(Sirf last 30 min me bot se bani entry undo ho sakti hai.)', msg);
+            await sendText(remoteJid, '❓ No recent entry found to undo.\n(Only entries made by the bot in the last 30 min can be undone.)', msg);
             continue;
           }
           try {
             await client.deleteEntry(last.type, last.id);
             lastEntries.delete(senderKey);
-            const typeLabel = last.type === 'sale' ? 'Sales' : 'Receipt';
+            const typeLabel = last.type === 'sale' ? 'Sales' : last.type === 'purchase' ? 'Purchase' : last.type === 'payment' ? 'Payment' : 'Receipt';
             await sendText(remoteJid, `🗑️ *Entry deleted:*\n🏪 ${last.partyName}\n💰 ${formatRs(last.amount)} (${typeLabel})`, msg);
             console.log(`↩️ undo: deleted ${last.type} #${last.id} (${last.partyName} ${last.amount})`);
           } catch (e) {
             console.error('undo fail:', e.message);
-            await sendText(remoteJid, `❌ Delete nahi ho saki: ${e.message}`, msg);
+            await sendText(remoteJid, `❌ Could not delete: ${e.message}`, msg);
           }
           continue;
         }
@@ -705,7 +705,7 @@ async function startBot() {
         if (low === 'cancel all' || low === 'cancel queue') {
           convos.clear(senderKey);
           mediaQueues.delete(senderKey);
-          await sendText(remoteJid, '❌ Sab cancel ho gaya — queue bhi clear kar di.', msg);
+          await sendText(remoteJid, '❌ Everything cancelled — queue cleared too.', msg);
           continue;
         }
         if (CANCEL_WORDS.has(low)) {
@@ -713,7 +713,7 @@ async function startBot() {
           const left = mediaQueues.get(senderKey)?.length || 0;
           await sendText(
             remoteJid,
-            left ? `❌ Ye bill cancel ho gayi. Ab queue ki next bill start karta hun…` : '❌ Cancel ho gaya. New bill ke liye dobara photo/PDF send karo.',
+            left ? `❌ This bill is cancelled. Starting the next bill in the queue…` : '❌ Cancelled. Send a photo/PDF again for a new bill.',
             msg
           );
           await advanceQueue();
@@ -748,13 +748,13 @@ async function startBot() {
           if (!parties) { convos.clear(senderKey); continue; }
           const n = parseSelection(text, Math.min(parties.length, 50));
           if (!n) {
-            await sendText(remoteJid, `❌ 1 se ${Math.min(parties.length, 50)} tak ka number send karo.\n\n${partyListPrompt(parties)}`, msg);
+            await sendText(remoteJid, `❌ Send a number from 1 to ${Math.min(parties.length, 50)}.\n\n${partyListPrompt(parties)}`, msg);
             continue;
           }
           const party = parties[n - 1];
           convos.setStep(senderKey, STEPS.TYPE, { partyId: party.id, partyName: party.name });
           console.log(`👉 party chosen: ${party.name}`);
-          await sendText(remoteJid, `🏪 Party: *${party.name}*\n\nEntry type select karo:\n1. 💰 Sales\n2. 🧾 Receipt\n3. 🛒 Purchase\n4. 💸 Payment\n\n❌ Cancel ke liye "cancel" likho`, msg);
+          await sendText(remoteJid, `🏪 Party: *${party.name}*\n\nSelect entry type:\n1. 💰 Sales\n2. 🧾 Receipt\n3. 🛒 Purchase\n4. 💸 Payment\n\n❌ Type "cancel" to cancel`, msg);
           continue;
         }
 
@@ -765,20 +765,20 @@ async function startBot() {
           else if (low === '3' || low === 'purchase' || low === 'purchases' || low === 'kharid') entryType = 'purchase';
           else if (low === '4' || low === 'payment' || low === 'payments' || low === 'adaigi' || low === 'paid to') entryType = 'payment';
           if (!entryType) {
-            await sendText(remoteJid, '❌ 1=Sales, 2=Receipt, 3=Purchase, 4=Payment send karo.', msg);
+            await sendText(remoteJid, '❌ Send 1=Sales, 2=Receipt, 3=Purchase, 4=Payment.', msg);
             continue;
           }
           convos.setStep(senderKey, STEPS.AMOUNT, { entryType });
           const label = entryType === 'sale' ? '💰 Sales' : entryType === 'purchase' ? '🛒 Purchase' : entryType === 'payment' ? '💸 Payment' : '🧾 Receipt';
           console.log(`👉 type chosen: ${entryType}`);
-          await sendText(remoteJid, `✅ ${label}\n\n🔢 Ab *amount* send karo (misal: 5000):\n\n❌ Cancel ke liye "cancel" likho`, msg);
+          await sendText(remoteJid, `✅ ${label}\n\n🔢 Now send the *amount* (e.g. 5000):\n\n❌ Type "cancel" to cancel`, msg);
           continue;
         }
 
         if (sess.step === STEPS.AMOUNT) {
           const { amount, description } = parseAmountAndDescription(text);
           if (amount === null) {
-            await sendText(remoteJid, '❌ Sahi amount likho (misal: 50000).', msg);
+            await sendText(remoteJid, '❌ Enter a valid amount (e.g. 50000).', msg);
             continue;
           }
           if (description) {
@@ -787,7 +787,7 @@ async function startBot() {
             console.log(`👉 amount entered: ${amount} | desc: ${description.slice(0, 40)} — asking date`);
             await sendText(
               remoteJid,
-              `✅ Amount: ${formatRs(amount)}\n📝 ${description}\n\n📅 Bill ki *date* kya hai?\n*today* likho, ya custom date likho (misal: 28-09-2026):\n\n❌ Cancel ke liye "cancel" likho`,
+              `✅ Amount: ${formatRs(amount)}\n📝 ${description}\n\n📅 What is the bill *date*?\nType *today*, or a custom date (e.g. 28-09-2026):\n\n❌ Type "cancel" to cancel`,
               msg
             );
             continue;
@@ -796,7 +796,7 @@ async function startBot() {
           console.log(`👉 amount entered: ${amount} — asking description`);
           await sendText(
             remoteJid,
-            `✅ Amount: ${formatRs(amount)}\n\n📝 Ab *description* likho (optional hai):\n\nSkip karne ke liye "skip" likho.\n\n❌ Cancel ke liye "cancel" likho`,
+            `✅ Amount: ${formatRs(amount)}\n\n📝 Now write a *description* (optional):\n\nType "skip" to skip.\n\n❌ Type "cancel" to cancel`,
             msg
           );
           continue;
@@ -810,7 +810,7 @@ async function startBot() {
           console.log(`👉 description entered: ${description ? description.slice(0, 40) : '(skipped)'} — asking date`);
           await sendText(
             remoteJid,
-            `✅ Amount: ${formatRs(s.amount)}${description ? `\n📝 ${description}` : ''}\n\n📅 Bill ki *date* kya hai?\n*today* likho, ya custom date likho (misal: 28-09-2026):\n\n❌ Cancel ke liye "cancel" likho`,
+            `✅ Amount: ${formatRs(s.amount)}${description ? `\n📝 ${description}` : ''}\n\n📅 What is the bill *date*?\nType *today*, or a custom date (e.g. 28-09-2026):\n\n❌ Type "cancel" to cancel`,
             msg
           );
           continue;
@@ -820,7 +820,7 @@ async function startBot() {
           const s = convos.get(senderKey);
           const entryDate = parseDateInput(text, todayPK());
           if (!entryDate) {
-            await sendText(remoteJid, '❌ Sahi date likho: *today* likho, ya custom date (misal: 28-09-2026 ya 2026-09-28).', msg);
+            await sendText(remoteJid, '❌ Enter a valid date: type *today*, or a custom date (e.g. 28-09-2026 or 2026-09-28).', msg);
             continue;
           }
           const dup = await findDuplicate(s.partyId, s.entryType, s.amount, entryDate);
@@ -844,10 +844,10 @@ async function startBot() {
           }
           if (['nahi', 'nahin', 'na', 'no', 'n', '2'].includes(low)) {
             convos.clear(senderKey);
-            await sendText(remoteJid, '❌ OK, entry save nahi ki.', msg);
+            await sendText(remoteJid, '❌ OK, entry not saved.', msg);
             continue;
           }
-          await sendText(remoteJid, '❓ Save ke liye *haan*, cancel ke liye *nahi* likho.', msg);
+          await sendText(remoteJid, '❓ Type *yes* to save, *no* to cancel.', msg);
           continue;
         }
 

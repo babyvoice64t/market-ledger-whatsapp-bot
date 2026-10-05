@@ -41,6 +41,6 @@ export function formatRs(n) {
 }
 
 export const USAGE_TEXT =
-  '📸 Bill ki *photo ya PDF* bhejo — phir main khud poochhunga:\n' +
-  '1️⃣ Party ka number\n2️⃣ Sales ya Receipt\n3️⃣ Amount\n\n' +
-  'Shortcut: photo ke saath caption "<party name> sales|receipt|purchase|payment <amount>" bhi chalega.';
+  '📸 Send a bill *photo or PDF* — then I will ask you:\n' +
+  '1️⃣ Party number\n2️⃣ Sales / Receipt / Purchase / Payment\n3️⃣ Amount\n\n' +
+  'Shortcut: a photo with caption "<party name> sales|receipt|purchase|payment <amount>" also works.';
