@@ -22,11 +22,18 @@ test('single-word party name', () => {
     { ok: true, partyName: 'Ahmed', type: 'sale', amount: 100 });
 });
 
-test('paid/payment/received map to receipt', () => {
-  assert.equal(parseCaption('Ahmed Traders paid 20000').type, 'receipt');
-  assert.equal(parseCaption('Ahmed Traders payment 20000').type, 'receipt');
+test('paid/payment map to payment, received/receipts map to receipt', () => {
+  assert.equal(parseCaption('Ahmed Traders paid 20000').type, 'payment');
+  assert.equal(parseCaption('Ahmed Traders payment 20000').type, 'payment');
+  assert.equal(parseCaption('Ahmed Traders adaigi 20000').type, 'payment');
   assert.equal(parseCaption('Ahmed Traders received 20000').type, 'receipt');
   assert.equal(parseCaption('Ahmed Traders receipts 20000').type, 'receipt');
+  assert.equal(parseCaption('Ahmed Traders wasooli 20000').type, 'receipt');
+});
+
+test('purchase/kharid map to purchase', () => {
+  assert.equal(parseCaption('Steel Co purchase 80000').type, 'purchase');
+  assert.equal(parseCaption('Steel Co kharid 80000').type, 'purchase');
 });
 
 test('extra whitespace tolerated', () => {
