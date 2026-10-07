@@ -137,32 +137,6 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, login
     return j;
   }
 
-  // Returns: photo optional, same contract as payments (multipart photo or JSON).
-  async function createReturn({ partyId, amount, date, description, photoBuffer, filename, mimetype }) {
-    const t = await ensureToken();
-    if (photoBuffer) {
-      const form = new FormData();
-      form.append('password', t);
-      form.append('party_id', String(partyId));
-      form.append('amount', String(amount));
-      form.append('date', date);
-      if (description) form.append('description', description);
-      form.append('photo', new Blob([photoBuffer], { type: mimetype || 'image/jpeg' }), filename || 'return.jpg');
-      const r = await fetchImpl(base + '/api/returns', { method: 'POST', body: form });
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok || !j.ok) throw new Error(j.error || 'return request failed');
-      return j;
-    }
-    const r = await fetchImpl(base + '/api/returns', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: t, party_id: partyId, amount, date, description }),
-    });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok || !j.ok) throw new Error(j.error || 'return request failed');
-    return j;
-  }
-
   async function createReceipt({ partyId, amount, date, description }) {
     const t = await ensureToken();
     const r = await fetchImpl(`${base}/api/receipts`, {
@@ -176,9 +150,9 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, login
   }
 
   // Entries created in the last `minutes` for a party (for duplicate detection).
-  // /api/entries/recent only covers sales + receipts, so purchase/payment/return
+  // /api/entries/recent only covers sales + receipts, so purchase/payment
   // entries are merged in from /api/ledger (duplicate match is on date+amount).
-  // -> [{type:'sale'|'receipt'|'purchase'|'payment'|'return', id, amount, description, date, created_at}]
+  // -> [{type:'sale'|'receipt'|'purchase'|'payment', id, amount, description, date, created_at}]
   async function getRecentEntries(partyId, minutes = 120) {
     const r = await authedGet(
       `/api/entries/recent?party_id=${encodeURIComponent(partyId)}&minutes=${encodeURIComponent(minutes)}`
@@ -192,7 +166,7 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, login
       if (lr.ok && Array.isArray(lj.entries)) {
         const have = new Set(entries.map((e) => `${e.type}:${e.id}`));
         for (const e of lj.entries) {
-          if (e.type !== 'purchase' && e.type !== 'payment' && e.type !== 'return') continue;
+          if (e.type !== 'purchase' && e.type !== 'payment') continue;
           const key = `${e.type}:${e.id}`;
           if (have.has(key)) continue;
           have.add(key);
@@ -213,7 +187,6 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, login
       purchase: 'purchases',
       receipt: 'receipts',
       payment: 'payments',
-      return: 'returns',
     };
     const endpoint = endpointByType[entryType];
     if (!endpoint) throw new Error(`unknown entry type: ${entryType}`);
@@ -241,7 +214,6 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, login
     createSale,
     createPurchase,
     createPayment,
-    createReturn,
     createReceipt,
     getRecentEntries,
     deleteEntry,

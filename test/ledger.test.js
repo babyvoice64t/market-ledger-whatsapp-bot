@@ -146,61 +146,12 @@ test('getBalance returns totals.balance', async () => {
   assert.equal(await c.getBalance(1), 30000);
 });
 
-test('createReturn sends JSON to /api/returns without a photo', async () => {
-  let seenUrl = null, seenBody = null;
-  const f = mockFetch([
-    { match: isLogin, ...LOGIN },
-    {
-      match: (url, opts) => {
-        if (url.includes('/api/returns') && opts.method === 'POST') {
-          seenUrl = url; seenBody = JSON.parse(opts.body); return true;
-        }
-        return false;
-      },
-      status: 200, json: { ok: true, id: 11, photo_url: '' },
-    },
-  ]);
-  const c = createLedgerClient({ baseUrl: 'https://x.test', password: 'dummy', fetchImpl: f });
-  const res = await c.createReturn({ partyId: 2, amount: 5000, date: '2026-10-05', description: 'Added via WhatsApp' });
-  assert.equal(res.id, 11);
-  assert.ok(seenUrl.includes('/api/returns'));
-  assert.equal(seenBody.party_id, 2);
-  assert.equal(seenBody.amount, 5000);
-  assert.ok(!('photo' in seenBody), 'return without photo must not carry a photo field');
-});
-
-test('createReturn sends multipart FormData when a photo is attached', async () => {
-  let seen = null;
-  const f = mockFetch([
-    { match: isLogin, ...LOGIN },
-    {
-      match: (url, opts) => {
-        if (url.includes('/api/returns') && opts.method === 'POST') { seen = opts.body; return true; }
-        return false;
-      },
-      status: 200, json: { ok: true, id: 12, photo_url: 'https://cdn/ret.jpg' },
-    },
-  ]);
-  const c = createLedgerClient({ baseUrl: 'https://x.test', password: 'dummy', fetchImpl: f });
-  const res = await c.createReturn({
-    partyId: 1, amount: 5000, date: '2026-10-05',
-    description: 'Added via WhatsApp',
-    photoBuffer: Buffer.from([1, 2, 3]), filename: 'return.jpg',
-  });
-  assert.equal(res.ok, true);
-  assert.equal(res.photo_url, 'https://cdn/ret.jpg');
-  assert.ok(seen instanceof FormData, 'body must be FormData when photo attached');
-  assert.equal(seen.get('party_id'), '1');
-  assert.equal(seen.get('amount'), '5000');
-  assert.equal(seen.get('photo').name, 'return.jpg');
-});
-
-test('getRecentEntries merges purchase/payment/return from /api/ledger', async () => {
+test('getRecentEntries merges purchase/payment from /api/ledger', async () => {
   const recent = [{ type: 'sale', id: 7, amount: 5000, description: '', date: '2026-10-05', created_at: '2026-10-05T10:00:00.000Z' }];
   const ledgerEntries = [
     { type: 'sale', id: 7, amount: 5000, description: '', date: '2026-10-05' },
     { type: 'purchase', id: 2, amount: 80000, description: '', date: '2026-10-05' },
-    { type: 'return', id: 5, amount: 5000, description: 'Inv#9', date: '2026-10-05' },
+    { type: 'payment', id: 5, amount: 5000, description: 'Inv#9', date: '2026-10-05' },
   ];
   const f = mockFetch([
     { match: isLogin, ...LOGIN },
@@ -210,10 +161,10 @@ test('getRecentEntries merges purchase/payment/return from /api/ledger', async (
   const c = createLedgerClient({ baseUrl: 'https://x.test', password: 'dummy', fetchImpl: f });
   const out = await c.getRecentEntries(3, 180);
   const byKey = out.map((e) => `${e.type}:${e.id}`);
-  assert.deepEqual(byKey, ['sale:7', 'purchase:2', 'return:5']); // sale not duplicated
-  const ret = out.find((e) => e.type === 'return');
-  assert.equal(ret.amount, 5000);
-  assert.equal(ret.date, '2026-10-05');
+  assert.deepEqual(byKey, ['sale:7', 'purchase:2', 'payment:5']); // sale not duplicated
+  const pay = out.find((e) => e.type === 'payment');
+  assert.equal(pay.amount, 5000);
+  assert.equal(pay.date, '2026-10-05');
 });
 
 test('login failure surfaces server error with status', async () => {
@@ -268,14 +219,12 @@ test('deleteEntry maps every entry type to its own endpoint (undo)', async () =>
   await c.deleteEntry('purchase', 2);
   await c.deleteEntry('receipt', 3);
   await c.deleteEntry('payment', 4);
-  await c.deleteEntry('return', 5);
   const paths = seen.map((u) => new URL(u).pathname);
   assert.deepEqual(paths, [
     '/api/sales/1',
     '/api/purchases/2',
     '/api/receipts/3',
     '/api/payments/4',
-    '/api/returns/5',
   ]);
 });
 

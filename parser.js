@@ -1,12 +1,11 @@
 // Caption parser for the Market Ledger WhatsApp bot.
 // Caption format: "<party name> <type> <amount>"
-// Examples: "Ahmed Traders sales 50000", "ABC Co receipt 12,500.50", "Steel Co purchase 80000", "Ahmed Traders return 5000"
+// Examples: "Ahmed Traders sales 50000", "ABC Co receipt 12,500.50", "Steel Co purchase 80000"
 
 const SALE_KEYS = new Set(['sale', 'sales']);
 const RECEIPT_KEYS = new Set(['receipt', 'receipts', 'received', 'wasooli']);
 const PURCHASE_KEYS = new Set(['purchase', 'purchases', 'kharid']);
 const PAYMENT_KEYS = new Set(['payment', 'payments', 'paid', 'adaigi']);
-const RETURN_KEYS = new Set(['return', 'returns', 'wapsi', 'wapas']);
 
 export function parseCaption(caption) {
   const fail = (reason) => ({ ok: false, reason });
@@ -24,7 +23,6 @@ export function parseCaption(caption) {
   else if (RECEIPT_KEYS.has(typeRaw)) type = 'receipt';
   else if (PURCHASE_KEYS.has(typeRaw)) type = 'purchase';
   else if (PAYMENT_KEYS.has(typeRaw)) type = 'payment';
-  else if (RETURN_KEYS.has(typeRaw)) type = 'return';
   else return fail('bad_type');
 
   const partyName = tokens.slice(0, -2).join(' ').trim();
@@ -44,5 +42,5 @@ export function formatRs(n) {
 
 export const USAGE_TEXT =
   '📸 Send a bill *photo or PDF* — then I will ask you:\n' +
-  '1️⃣ Party number\n2️⃣ Sales / Receipt / Purchase / Payment / Return\n3️⃣ Amount\n\n' +
-  'Shortcut: a photo with caption "<party name> sales|receipt|purchase|payment|return <amount>" also works.';
+  '1️⃣ Party number\n2️⃣ Sales / Receipt / Purchase / Payment\n3️⃣ Amount\n\n' +
+  'Shortcut: a photo with caption "<party name> sales|receipt|purchase|payment <amount>" also works.';

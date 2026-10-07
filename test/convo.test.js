@@ -91,13 +91,6 @@ test('parseSelection: valid and out-of-range', () => {
   assert.equal(parseSelection('2.5', 5), 2); // parseInt semantics
 });
 
-test('type number 5 routes to the fifth choice (Return)', () => {
-  // Guided flow offers five types (1=Sales … 5=Return); number 5 must parse.
-  assert.equal(parseSelection('5', 5), 5);
-  assert.equal(parseSelection(' 5 ', 5), 5);
-  assert.equal(parseSelection('5', 4), null); // out of range before Return existed
-});
-
 test('formatPartyList: numbered list', () => {
   const out = formatPartyList([{ name: 'Ahmed Traders' }, { name: 'Bilal Store' }]);
   assert.equal(out, '1. Ahmed Traders\n2. Bilal Store');

@@ -148,7 +148,7 @@ app.get('/qr', async (req, res) => {
   res.json({ qr: qrDataUrl, connected: isConnected, groups: groupBindings.size });
 });
 
-app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, groups: groupBindings.size, version: '2.7.0' }));
+app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, groups: groupBindings.size, version: '2.8.0' }));
 
 // ─── Helpers ───
 function msgKeyId(key) { return `${key.remoteJid}:${key.id}`; }
@@ -315,8 +315,8 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
   try {
     let entryId = null;
     let photoFailed = false; // receipt: bill photo Cloudinary upload failed (entry still saved)
-    if (parsed.type === 'sale' || parsed.type === 'purchase' || parsed.type === 'payment' || parsed.type === 'return') {
-      const createFn = parsed.type === 'sale' ? L.createSale : parsed.type === 'purchase' ? L.createPurchase : parsed.type === 'return' ? L.createReturn : L.createPayment;
+    if (parsed.type === 'sale' || parsed.type === 'purchase' || parsed.type === 'payment') {
+      const createFn = parsed.type === 'sale' ? L.createSale : parsed.type === 'purchase' ? L.createPurchase : L.createPayment;
       const res = await createFn({
         partyId: party.id,
         amount: parsed.amount,
@@ -345,7 +345,7 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
     }
 
     const balance = await L.getBalance(party.id).catch(() => null);
-    const title = parsed.type === 'sale' ? '✅ *Sale Recorded*' : parsed.type === 'purchase' ? '✅ *Purchase Recorded*' : parsed.type === 'payment' ? '✅ *Payment Recorded*' : parsed.type === 'return' ? '↩️ *Return Recorded*' : '✅ *Receipt Recorded*';
+    const title = parsed.type === 'sale' ? '✅ *Sale Recorded*' : parsed.type === 'purchase' ? '✅ *Purchase Recorded*' : parsed.type === 'payment' ? '✅ *Payment Recorded*' : '✅ *Receipt Recorded*';
     const lines = [title, `🏪 Party: ${party.name}`, `💰 Amount: ${formatRs(parsed.amount)}`];
     if (desc !== 'Added via WhatsApp') lines.push(`📝 ${desc}`);
     if (date !== todayPK()) lines.push(`📅 Date: ${date}`);
@@ -558,7 +558,7 @@ async function startBot() {
         }
 
         function dupPrompt(partyName, entryType, amount, entryDate) {
-          const typeLabel = entryType === 'sale' ? '💰 Sales' : entryType === 'purchase' ? '🛒 Purchase' : entryType === 'payment' ? '💸 Payment' : entryType === 'return' ? '↩️ Return' : '🧾 Receipt';
+          const typeLabel = entryType === 'sale' ? '💰 Sales' : entryType === 'purchase' ? '🛒 Purchase' : entryType === 'payment' ? '💸 Payment' : '🧾 Receipt';
           return (
             `⚠️ *This entry may already be saved:*\n` +
             `🏪 Party: ${partyName}\n${typeLabel}: ${formatRs(amount)}\n📅 Date: ${entryDate}\n\n` +
@@ -687,7 +687,7 @@ async function startBot() {
           try {
             await client.deleteEntry(last.type, last.id);
             lastEntries.delete(senderKey);
-            const typeLabel = last.type === 'sale' ? 'Sales' : last.type === 'purchase' ? 'Purchase' : last.type === 'payment' ? 'Payment' : last.type === 'return' ? 'Return' : 'Receipt';
+            const typeLabel = last.type === 'sale' ? 'Sales' : last.type === 'purchase' ? 'Purchase' : last.type === 'payment' ? 'Payment' : 'Receipt';
             await sendText(remoteJid, `🗑️ *Entry deleted:*\n🏪 ${last.partyName}\n💰 ${formatRs(last.amount)} (${typeLabel})`, msg);
             console.log(`↩️ undo: deleted ${last.type} #${last.id} (${last.partyName} ${last.amount})`);
           } catch (e) {
@@ -754,7 +754,7 @@ async function startBot() {
           const party = parties[n - 1];
           convos.setStep(senderKey, STEPS.TYPE, { partyId: party.id, partyName: party.name });
           console.log(`👉 party chosen: ${party.name}`);
-          await sendText(remoteJid, `🏪 Party: *${party.name}*\n\nSelect entry type:\n1. 💰 Sales\n2. 🧾 Receipt\n3. 🛒 Purchase\n4. 💸 Payment\n5. ↩️ Return\n\n❌ Type "cancel" to cancel`, msg);
+          await sendText(remoteJid, `🏪 Party: *${party.name}*\n\nSelect entry type:\n1. 💰 Sales\n2. 🧾 Receipt\n3. 🛒 Purchase\n4. 💸 Payment\n\n❌ Type "cancel" to cancel`, msg);
           continue;
         }
 
@@ -764,13 +764,12 @@ async function startBot() {
           else if (low === '2' || low === 'receipt' || low === 'receipts') entryType = 'receipt';
           else if (low === '3' || low === 'purchase' || low === 'purchases' || low === 'kharid') entryType = 'purchase';
           else if (low === '4' || low === 'payment' || low === 'payments' || low === 'adaigi' || low === 'paid to') entryType = 'payment';
-          else if (low === '5' || low === 'return' || low === 'returns' || low === 'wapsi' || low === 'wapas') entryType = 'return';
           if (!entryType) {
-            await sendText(remoteJid, '❌ Send 1=Sales, 2=Receipt, 3=Purchase, 4=Payment, 5=Return.', msg);
+            await sendText(remoteJid, '❌ Send 1=Sales, 2=Receipt, 3=Purchase, 4=Payment.', msg);
             continue;
           }
           convos.setStep(senderKey, STEPS.AMOUNT, { entryType });
-          const label = entryType === 'sale' ? '💰 Sales' : entryType === 'purchase' ? '🛒 Purchase' : entryType === 'payment' ? '💸 Payment' : entryType === 'return' ? '↩️ Return' : '🧾 Receipt';
+          const label = entryType === 'sale' ? '💰 Sales' : entryType === 'purchase' ? '🛒 Purchase' : entryType === 'payment' ? '💸 Payment' : '🧾 Receipt';
           console.log(`👉 type chosen: ${entryType}`);
           await sendText(remoteJid, `✅ ${label}\n\n🔢 Now send the *amount* (e.g. 5000):\n\n❌ Type "cancel" to cancel`, msg);
           continue;
