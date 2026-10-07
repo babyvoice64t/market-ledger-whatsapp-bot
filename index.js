@@ -20,6 +20,7 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { Boom } from '@hapi/boom';
 import { v2 as cloudinary } from 'cloudinary';
+import { randomBytes } from 'node:crypto';
 import { parseCaption, formatRs, USAGE_TEXT } from './parser.js';
 import { createLedgerClient, createUserLedgerClient } from './ledger.js';
 import { parseActivateCommand } from './botcmd.js';
@@ -148,7 +149,7 @@ app.get('/qr', async (req, res) => {
   res.json({ qr: qrDataUrl, connected: isConnected, groups: groupBindings.size });
 });
 
-app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, groups: groupBindings.size, version: '2.8.0' }));
+app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, groups: groupBindings.size, version: '2.8.1' }));
 
 // ─── Helpers ───
 function msgKeyId(key) { return `${key.remoteJid}:${key.id}`; }
@@ -186,14 +187,15 @@ async function sendText(groupJid, text, quoted) {
 // Receipt attachments: the /api/receipts endpoint has no file field, so the bot
 // uploads the bill file to Cloudinary (folder market-ledger/) itself and appends
 // the URL to the receipt description. Works for images and PDFs.
-async function uploadMedia(buffer, mimetype, partyName, kind) {
+// Uploads are type 'authenticated' (not publicly readable) with a random
+// public_id — no party name or timestamp, so bill URLs can't be guessed.
+async function uploadMedia(buffer, mimetype) {
   const dataUri = `data:${mimetype || 'application/octet-stream'};base64,${buffer.toString('base64')}`;
-  const safe = String(partyName || 'party').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30) || 'party';
-  const prefix = kind === 'pdf' ? 'receiptpdf' : 'receipt';
   const up = await cloudinary.uploader.upload(dataUri, {
     folder: 'market-ledger',
-    public_id: `${prefix}_${safe}_${Date.now()}`,
+    public_id: 's' + randomBytes(9).toString('hex'),
     resource_type: 'auto',
+    type: 'authenticated',
   });
   return up.secure_url || '';
 }
@@ -330,7 +332,7 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
     } else {
       let photoUrl = '';
       try {
-        photoUrl = await uploadMedia(buffer, mimetype, party.name, kind);
+        photoUrl = await uploadMedia(buffer, mimetype);
       } catch (e) {
         photoFailed = true;
         console.error('receipt file upload fail:', e.message);
