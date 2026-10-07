@@ -36,6 +36,24 @@ test('purchase/kharid map to purchase', () => {
   assert.equal(parseCaption('Steel Co kharid 80000').type, 'purchase');
 });
 
+test('return/returns/wapsi/wapas map to return', () => {
+  assert.deepEqual(parseCaption('Ahmed Traders return 5000'),
+    { ok: true, partyName: 'Ahmed Traders', type: 'return', amount: 5000 });
+  assert.equal(parseCaption('Ahmed Traders returns 5000').type, 'return');
+  assert.equal(parseCaption('Ahmed Traders wapsi 5000').type, 'return');
+  assert.equal(parseCaption('Ahmed Traders wapas 5000').type, 'return');
+  assert.equal(parseCaption('Ahmed Traders RETURN 5,000').type, 'return');
+});
+
+test('return keys are not captured by receipt/payment/sale keys', () => {
+  // 'returns' must not fall into receipt ('receipts') or payment/sale buckets
+  assert.equal(parseCaption('Steel Co returns 12000').type, 'return');
+  assert.equal(parseCaption('Steel Co receipts 12000').type, 'receipt');
+  assert.equal(parseCaption('Steel Co received 12000').type, 'receipt');
+  assert.equal(parseCaption('Steel Co paid 12000').type, 'payment');
+  assert.equal(parseCaption('Steel Co sales 12000').type, 'sale');
+});
+
 test('extra whitespace tolerated', () => {
   assert.deepEqual(parseCaption('  Ahmed Traders   Sales   5,000  '),
     { ok: true, partyName: 'Ahmed Traders', type: 'sale', amount: 5000 });

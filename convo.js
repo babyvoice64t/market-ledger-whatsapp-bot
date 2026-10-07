@@ -1,7 +1,7 @@
 // convo.js — step-by-step conversational bill entry sessions for the Market Ledger bot.
 //
 // New flow: user sends a bill photo/PDF (no caption needed) → bot asks for
-// party (numbered list) → bot asks type (1=Sales, 2=Receipt) → bot asks amount
+// party (numbered list) → bot asks type (1=Sales, 2=Receipt, 3=Purchase, 4=Payment, 5=Return) → bot asks amount
 // → bot asks description (separate step, optional — "skip" to skip) → bot asks
 // date → entry is created. One active session per sender; sessions expire after TTL.
 

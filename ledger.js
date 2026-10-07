@@ -137,6 +137,32 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, login
     return j;
   }
 
+  // Returns: photo optional, same contract as payments (multipart photo or JSON).
+  async function createReturn({ partyId, amount, date, description, photoBuffer, filename, mimetype }) {
+    const t = await ensureToken();
+    if (photoBuffer) {
+      const form = new FormData();
+      form.append('password', t);
+      form.append('party_id', String(partyId));
+      form.append('amount', String(amount));
+      form.append('date', date);
+      if (description) form.append('description', description);
+      form.append('photo', new Blob([photoBuffer], { type: mimetype || 'image/jpeg' }), filename || 'return.jpg');
+      const r = await fetchImpl(base + '/api/returns', { method: 'POST', body: form });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || 'return request failed');
+      return j;
+    }
+    const r = await fetchImpl(base + '/api/returns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: t, party_id: partyId, amount, date, description }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) throw new Error(j.error || 'return request failed');
+    return j;
+  }
+
   async function createReceipt({ partyId, amount, date, description }) {
     const t = await ensureToken();
     const r = await fetchImpl(`${base}/api/receipts`, {
@@ -150,19 +176,48 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, login
   }
 
   // Entries created in the last `minutes` for a party (for duplicate detection).
-  // -> [{type:'sale'|'receipt', id, amount, description, date, created_at}]
+  // /api/entries/recent only covers sales + receipts, so purchase/payment/return
+  // entries are merged in from /api/ledger (duplicate match is on date+amount).
+  // -> [{type:'sale'|'receipt'|'purchase'|'payment'|'return', id, amount, description, date, created_at}]
   async function getRecentEntries(partyId, minutes = 120) {
     const r = await authedGet(
       `/api/entries/recent?party_id=${encodeURIComponent(partyId)}&minutes=${encodeURIComponent(minutes)}`
     );
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || 'recent entries request failed');
-    return j.entries || [];
+    const entries = j.entries || [];
+    try {
+      const lr = await authedGet(`/api/ledger?party_id=${encodeURIComponent(partyId)}`);
+      const lj = await lr.json().catch(() => ({}));
+      if (lr.ok && Array.isArray(lj.entries)) {
+        const have = new Set(entries.map((e) => `${e.type}:${e.id}`));
+        for (const e of lj.entries) {
+          if (e.type !== 'purchase' && e.type !== 'payment' && e.type !== 'return') continue;
+          const key = `${e.type}:${e.id}`;
+          if (have.has(key)) continue;
+          have.add(key);
+          entries.push({
+            type: e.type, id: e.id, amount: e.amount,
+            description: e.description || '', date: e.date, created_at: '',
+          });
+        }
+      }
+    } catch { /* duplicate detection just falls back to sales + receipts */ }
+    return entries;
   }
 
   async function deleteEntry(entryType, id) {
     const t = await ensureToken();
-    const path = entryType === 'sale' ? `/api/sales/${id}` : entryType === 'purchase' ? `/api/purchases/${id}` : `/api/receipts/${id}`;
+    const endpointByType = {
+      sale: 'sales',
+      purchase: 'purchases',
+      receipt: 'receipts',
+      payment: 'payments',
+      return: 'returns',
+    };
+    const endpoint = endpointByType[entryType];
+    if (!endpoint) throw new Error(`unknown entry type: ${entryType}`);
+    const path = `/api/${endpoint}/${id}`;
     const r = await fetchImpl(withToken(path, t), { method: 'DELETE' });
     if (r.status === 401) {
       token = null;
@@ -186,6 +241,7 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, login
     createSale,
     createPurchase,
     createPayment,
+    createReturn,
     createReceipt,
     getRecentEntries,
     deleteEntry,
