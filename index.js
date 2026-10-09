@@ -117,7 +117,7 @@ const app = express();
 app.use(express.json());
 
 app.get('/', (req, res) => {
-  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Market Ledger Bot</title>
+  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ledger360 Bot</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:system-ui,-apple-system,sans-serif;background:#fafafa;min-height:100vh;display:grid;place-items:center;padding:16px}
 .card{max-width:520px;width:100%;background:#fff;border:1px solid #e4e4e7;border-radius:24px;padding:32px;box-shadow:0 8px 32px rgba(0,0,0,.06)}
 h1{font-size:20px;font-weight:800;letter-spacing:-.02em}
@@ -127,7 +127,7 @@ h1{font-size:20px;font-weight:800;letter-spacing:-.02em}
 .ok{color:#16a34a;font-weight:700;font-size:15px}.wait{color:#a1a1aa;font-size:13px}
 .stat{margin-top:12px;padding:12px;border-radius:12px;background:#fafafa;border:1px solid #f0f0f0;font-size:12px;color:#52525b;line-height:1.7;font-family:monospace;white-space:pre-wrap}</style></head>
 <body><div class="card">
-<h1>Market Ledger WhatsApp Bot</h1>
+<h1>Ledger360 WhatsApp Bot</h1>
 <div class="sub">Ledger: ${LEDGER_URL}<br>Active groups: <span id="gCount">—</span></div>
 <div class="qr-box" id="qrBox"><span class="wait">Loading...</span></div>
 <div class="stat" id="stBox">—</div>
@@ -212,8 +212,8 @@ function todayPK() {
 
 // ─── DM promo reply (no functionality in personal chat) ───
 const PROMO_TEXT = (
-  '🤖 *Live Tech — Automation & Software*\n\n' +
-  'Hello! I am a WhatsApp automation bot.\n\n' +
+  '🤖 *Ledger360 — by Live Tech*\n\n' +
+  'Hello! I am the Ledger360 WhatsApp bot.\n\n' +
   'We build automation and custom software for businesses — ' +
   'WhatsApp bots, ledger systems and much more.\n\n' +
   '📞 Contact: 0317-3291218'
