@@ -23,8 +23,9 @@ import { v2 as cloudinary } from 'cloudinary';
 import { randomBytes } from 'node:crypto';
 import { parseCaption, formatRs, USAGE_TEXT } from './parser.js';
 import { createLedgerClient, createUserLedgerClient } from './ledger.js';
-import { parseActivateCommand, isBillCommand } from './botcmd.js';
-import { createConvoStore, STEPS, parseAmountAndDescription, parseSelection, parseDateInput, formatPartyList, CANCEL_WORDS } from './convo.js';
+import { parseActivateCommand, isBillCommand, parseBotCommand, parseMethodSelection, methodLabel } from './botcmd.js';
+import { createConvoStore, STEPS, parseAmount, parseAmountAndDescription, parseSelection, parseDateInput, parseOpeningBalance, formatPartyList, CANCEL_WORDS } from './convo.js';
+import { createTaskStore, TASK_STEPS, EXPENSE_CATEGORY_OPTIONS, expenseCategoryLabel } from './taskflow.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
@@ -103,6 +104,7 @@ const msgRetryCounterCache = makeSimpleCache();
 const messageStore = new Map();
 const handledIds = new Set(); // processed message ids (dedup across redelivery)
 const convos = createConvoStore(); // step-by-step bill entry sessions, one per sender
+const tasks = createTaskStore(); // new-party / expense workflows — kept separate from bill sessions
 const groupSubjectCache = makeSimpleCache(5 * 60);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -149,7 +151,7 @@ app.get('/qr', async (req, res) => {
   res.json({ qr: qrDataUrl, connected: isConnected, groups: groupBindings.size });
 });
 
-app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, groups: groupBindings.size, version: '2.9.0' }));
+app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, groups: groupBindings.size, version: '2.10.0' }));
 
 // ─── Helpers ───
 function msgKeyId(key) { return `${key.remoteJid}:${key.id}`; }
@@ -328,6 +330,7 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
         photoBuffer: buffer,
         filename,
         mimetype,
+        method: parsed.method || 'cash',
       });
       entryId = res && res.id != null ? res.id : null;
     } else {
@@ -345,6 +348,7 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
         amount: parsed.amount,
         date,
         description: desc + (photoUrl ? ` | Photo: ${photoUrl}` : ''),
+        method: parsed.method || 'cash',
       });
       entryId = res && res.id != null ? res.id : null;
     }
@@ -354,6 +358,9 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
     const lines = [title, `🏪 Party: ${party.name}`, `💰 Amount: ${formatRs(parsed.amount)}`];
     if (desc !== 'Added via WhatsApp') lines.push(`📝 ${desc}`);
     if (date !== todayPK()) lines.push(`📅 Date: ${date}`);
+    if ((parsed.type === 'receipt' || parsed.type === 'payment') && parsed.method && parsed.method !== 'cash') {
+      lines.push(`💳 Method: ${methodLabel(parsed.method)}`);
+    }
     if (photoFailed) {
       lines.push('⚠️ Bill photo upload failed (Cloudinary) — entry was still saved.');
     }
@@ -576,7 +583,7 @@ async function startBot() {
         // ── helper: create the entry from a finished session and track it for undo ──
         async function finalizeEntry(s) {
           convos.clear(senderKey);
-          const parsed = { ok: true, partyName: s.partyName, type: s.entryType, amount: s.amount };
+          const parsed = { ok: true, partyName: s.partyName, type: s.entryType, amount: s.amount, method: s.method || 'cash' };
           console.log(
             `👉 creating ${s.entryType}: ${s.partyName} ${s.amount} date=${s.entryDate}` +
               (s.description ? ` desc=${s.description.slice(0, 40)}` : '')
@@ -591,6 +598,287 @@ async function startBot() {
           const extra = parties.length > 50 ? `\n…plus ${parties.length - 50} more parties (showing first 50)` : '';
           return `🏪 Select a party — send the *number*:\n${formatPartyList(shown)}${extra}\n\n❌ Type "cancel" to cancel`;
         }
+
+        // ── Professional command menu: one command = one clean workflow ──
+        function helpText() {
+          return (
+            `🤖 *Ledger360 Bot — Commands*\n\n` +
+            `📸 Send a *photo/PDF* — guided bill entry\n` +
+            `🧾 *bill* — entry without photo\n` +
+            `👥 *newparty* — add a new party\n` +
+            `💸 *expense* — add shop expense\n` +
+            `📅 *today* — today's closing\n` +
+            `🧮 *dues* — pending balances\n` +
+            `↩️ *undo* — delete last bot entry\n` +
+            `❌ *cancel* — stop current process\n\n` +
+            `One process at a time — no mixing.`
+          );
+        }
+
+        function methodPrompt(title = 'Payment method') {
+          return `💳 *${title}*\n1. Cash\n2. JazzCash\n3. EasyPaisa\n4. Bank\n\nSend *1–4*.\n\n❌ Type "cancel" to cancel`;
+        }
+
+        async function startNewPartyTask() {
+          tasks.start(senderKey, 'party');
+          console.log(`👥 new party flow started in "${binding.name}"`);
+          await sendText(
+            remoteJid,
+            `👥 *New Party*\n\nStep 1/5 — Send the party *name*.\nExample: Ahmed Store\n\n❌ Type "cancel" to cancel`,
+            msg
+          );
+        }
+
+        async function startExpenseTask() {
+          tasks.start(senderKey, 'expense');
+          console.log(`💸 expense flow started in "${binding.name}"`);
+          const list = EXPENSE_CATEGORY_OPTIONS.map((c, i) => `${i + 1}. ${c.label}`).join('\n');
+          await sendText(
+            remoteJid,
+            `💸 *New Expense*\n\nStep 1/6 — Select category:\n${list}\n\nSend *1–7*.\n\n❌ Type "cancel" to cancel`,
+            msg
+          );
+        }
+
+        async function sendTodaySummary() {
+          try {
+            const data = await client.getToday(todayPK());
+            const t = data.totals || {};
+            const methodsText = (obj = {}) => ['cash', 'jazzcash', 'easypaisa', 'bank']
+              .filter((m) => Number(obj[m] || 0) > 0)
+              .map((m) => `${methodLabel(m)} ${formatRs(obj[m])}`)
+              .join(' · ');
+            const lines = [
+              `📅 *Today's Closing — ${todayPK()}*`,
+              `💰 Sales: ${formatRs(t.sales || 0)}`,
+              `🧾 Received: ${formatRs(t.receipts || 0)}`,
+              `🛒 Purchases: ${formatRs(t.purchases || 0)}`,
+              `💸 Paid: ${formatRs(t.payments || 0)}`,
+              `🏪 Expenses: ${formatRs(t.expenses || 0)}`,
+              `💵 *Net Cash: ${formatRs(data.cash_movement || 0)}*`,
+            ];
+            const receivedMethods = methodsText(data.methods?.received);
+            const paidMethods = methodsText(data.methods?.paid);
+            if (receivedMethods) lines.push(`Received by: ${receivedMethods}`);
+            if (paidMethods) lines.push(`Paid by: ${paidMethods}`);
+            await sendText(remoteJid, lines.join('\n'), msg);
+          } catch (e) {
+            console.error('today summary fail:', e.message);
+            await sendText(remoteJid, `❌ Could not load today's summary: ${e.message}`, msg);
+          }
+        }
+
+        async function sendDuesSummary() {
+          const parties = await needParties();
+          if (!parties) return;
+          const rows = parties
+            .filter((party) => Number(party.balance || 0) !== 0)
+            .map((party) => {
+              const balance = Number(party.balance || 0);
+              const days = party.days_since_entry;
+              const age = days === null || days === undefined ? '' : ` · ${days}d old`;
+              return { party, balance, age };
+            });
+          const receivable = rows.filter((r) => r.balance > 0).sort((a, b) => b.balance - a.balance).slice(0, 5);
+          const payable = rows.filter((r) => r.balance < 0).sort((a, b) => a.balance - b.balance).slice(0, 5);
+          if (!receivable.length && !payable.length) {
+            await sendText(remoteJid, '✅ No pending balances.', msg);
+            return;
+          }
+          const lines = ['🧮 *Pending Balances*'];
+          if (receivable.length) {
+            lines.push('', '*Receivable:*');
+            receivable.forEach((r, i) => lines.push(`${i + 1}. ${r.party.name} — ${formatRs(r.balance)}${r.age}`));
+          }
+          if (payable.length) {
+            lines.push('', '*Payable:*');
+            payable.forEach((r, i) => lines.push(`${i + 1}. ${r.party.name} — ${formatRs(Math.abs(r.balance))}${r.age}`));
+          }
+          lines.push('', 'Full list: open Parties → Dues in the app/portal.');
+          await sendText(remoteJid, lines.join('\n'), msg);
+        }
+
+        async function handleTaskMessage(task, rawText) {
+          const textValue = String(rawText || '').trim();
+          const low = textValue.toLowerCase();
+          if (CANCEL_WORDS.has(low)) {
+            tasks.clear(senderKey);
+            await sendText(remoteJid, '❌ Cancelled. Type *help* to see commands.', msg);
+            return;
+          }
+
+          if (task.flow === 'party') {
+            if (task.step === TASK_STEPS.NAME) {
+              const name = textValue.slice(0, 80);
+              if (name.length < 2) {
+                await sendText(remoteJid, '❌ Send a proper party name.\nExample: Ahmed Store', msg);
+                return;
+              }
+              tasks.setStep(senderKey, TASK_STEPS.PARTY_TYPE, { partyName: name });
+              await sendText(remoteJid, `🏪 Party: *${name}*\n\nStep 2/5 — Party type:\n1. Customer\n2. Purchaser\n\nSend *1* or *2*.`, msg);
+              return;
+            }
+            if (task.step === TASK_STEPS.PARTY_TYPE) {
+              let partyType = null;
+              if (low === '1' || low === 'customer') partyType = 'customer';
+              else if (low === '2' || low === 'purchaser' || low === 'supplier') partyType = 'supplier';
+              if (!partyType) {
+                await sendText(remoteJid, '❌ Send *1* for Customer or *2* for Purchaser.', msg);
+                return;
+              }
+              tasks.setStep(senderKey, TASK_STEPS.PHONE, { partyType });
+              await sendText(remoteJid, `Step 3/5 — Send the *phone number*.\nExample: 03001234567\n\nType *skip* if no number.`, msg);
+              return;
+            }
+            if (task.step === TASK_STEPS.PHONE) {
+              const skip = ['skip', '-', 'nahi', 'nahin', 'no', 'n'].includes(low);
+              const phone = skip ? '' : textValue.slice(0, 30);
+              const digits = phone.replace(/\D/g, '');
+              if (!skip && (digits.length < 10 || digits.length > 15)) {
+                await sendText(remoteJid, '❌ Send a valid phone number, or type *skip*.', msg);
+                return;
+              }
+              tasks.setStep(senderKey, TASK_STEPS.OPENING, { phone });
+              await sendText(
+                remoteJid,
+                `Step 4/5 — *Opening balance* bhejein.\n\nCustomer ka purana lena: 5000\nPurchaser ko dena ho: -5000\n\nType *skip* for 0.`,
+                msg
+              );
+              return;
+            }
+            if (task.step === TASK_STEPS.OPENING) {
+              const opening = parseOpeningBalance(textValue);
+              if (opening === null) {
+                await sendText(remoteJid, '❌ Valid opening balance bhejein.\nExample: 5000, -5000, or *skip*.', msg);
+                return;
+              }
+              const parties = await needParties();
+              if (!parties) { tasks.clear(senderKey); return; }
+              const duplicate = parties.some((party) => String(party.name || '').trim().toLowerCase() === String(task.partyName || '').trim().toLowerCase());
+              tasks.setStep(senderKey, TASK_STEPS.CONFIRM, { opening_balance: opening, duplicate });
+              const typeLabel = task.partyType === 'supplier' ? 'Purchaser' : 'Customer';
+              await sendText(
+                remoteJid,
+                `👥 *Confirm New Party*\n🏪 Name: ${task.partyName}\nType: ${typeLabel}\n📱 Phone: ${task.phone || '—'}\n💰 Opening: ${formatRs(opening)}${duplicate ? '\n⚠️ Is naam ki party pehle se mojood hai.' : ''}\n\nSave? *yes* / *no*`,
+                msg
+              );
+              return;
+            }
+            if (task.step === TASK_STEPS.CONFIRM) {
+              if (['yes', 'haan', 'ha', 'y', '1'].includes(low)) {
+                try {
+                  const res = await client.createParty({
+                    name: task.partyName,
+                    phone: task.phone || '',
+                    opening_balance: task.opening_balance || 0,
+                    party_type: task.partyType || 'customer',
+                  });
+                  tasks.clear(senderKey);
+                  trackLastEntry(senderKey, { ok: true, id: res.id, type: 'party', partyName: task.partyName, amount: task.opening_balance || 0 });
+                  await sendText(remoteJid, `✅ *Party Added*\n🏪 ${task.partyName}\nType: ${task.partyType === 'supplier' ? 'Purchaser' : 'Customer'}\n\nType *bill* to add its first entry.`, msg);
+                } catch (e) {
+                  tasks.clear(senderKey);
+                  await sendText(remoteJid, `❌ Could not add party: ${e.message}`, msg);
+                }
+                return;
+              }
+              if (['no', 'nahi', 'nahin', 'na', 'n', '2'].includes(low)) {
+                tasks.clear(senderKey);
+                await sendText(remoteJid, '❌ Party not saved.', msg);
+                return;
+              }
+              await sendText(remoteJid, '❓ Type *yes* to save, *no* to cancel.', msg);
+              return;
+            }
+          }
+
+          if (task.flow === 'expense') {
+            if (task.step === TASK_STEPS.CATEGORY) {
+              const n = parseSelection(textValue, EXPENSE_CATEGORY_OPTIONS.length);
+              if (!n) {
+                const list = EXPENSE_CATEGORY_OPTIONS.map((c, i) => `${i + 1}. ${c.label}`).join('\n');
+                await sendText(remoteJid, `❌ Send a number from 1 to ${EXPENSE_CATEGORY_OPTIONS.length}:\n${list}`, msg);
+                return;
+              }
+              const category = EXPENSE_CATEGORY_OPTIONS[n - 1].v;
+              tasks.setStep(senderKey, TASK_STEPS.AMOUNT, { category });
+              await sendText(remoteJid, `✅ ${expenseCategoryLabel(category)}\n\nStep 2/6 — Send the *amount*.\nExample: 15000`, msg);
+              return;
+            }
+            if (task.step === TASK_STEPS.AMOUNT) {
+              const amount = parseAmount(textValue);
+              if (amount === null) {
+                await sendText(remoteJid, '❌ Enter a valid amount. Example: 15000', msg);
+                return;
+              }
+              tasks.setStep(senderKey, TASK_STEPS.METHOD, { amount });
+              await sendText(remoteJid, `✅ Amount: ${formatRs(amount)}\n\nStep 3/6 — ${methodPrompt('Expense paid by')}`, msg);
+              return;
+            }
+            if (task.step === TASK_STEPS.METHOD) {
+              const method = parseMethodSelection(textValue);
+              if (!method) {
+                await sendText(remoteJid, '❌ Send *1* Cash, *2* JazzCash, *3* EasyPaisa, or *4* Bank.', msg);
+                return;
+              }
+              tasks.setStep(senderKey, TASK_STEPS.DATE, { method });
+              await sendText(remoteJid, `✅ Method: ${methodLabel(method)}\n\nStep 4/6 — Bill *date* bhejein.\nType *today*, or 28-09-2026.`, msg);
+              return;
+            }
+            if (task.step === TASK_STEPS.DATE) {
+              const expenseDate = parseDateInput(textValue, todayPK());
+              if (!expenseDate) {
+                await sendText(remoteJid, '❌ Valid date bhejein: *today*, 28-09-2026, or 2026-09-28.', msg);
+                return;
+              }
+              tasks.setStep(senderKey, TASK_STEPS.DESCRIPTION, { expenseDate });
+              await sendText(remoteJid, `✅ Date: ${expenseDate}\n\nStep 5/6 — Description (optional).\nType *skip* to skip.`, msg);
+              return;
+            }
+            if (task.step === TASK_STEPS.DESCRIPTION) {
+              const skip = ['skip', '-', 'nahi', 'nahin', 'no', 'n'].includes(low);
+              const description = skip ? '' : textValue.slice(0, 500);
+              tasks.setStep(senderKey, TASK_STEPS.CONFIRM, { description });
+              await sendText(
+                remoteJid,
+                `💸 *Confirm Expense*\nCategory: ${expenseCategoryLabel(task.category)}\n💰 Amount: ${formatRs(task.amount)}\n💳 Method: ${methodLabel(task.method || 'cash')}\n📅 Date: ${task.expenseDate}${description ? `\n📝 ${description}` : ''}\n\nStep 6/6 — Save? *yes* / *no*`,
+                msg
+              );
+              return;
+            }
+            if (task.step === TASK_STEPS.CONFIRM) {
+              if (['yes', 'haan', 'ha', 'y', '1'].includes(low)) {
+                try {
+                  const res = await client.createExpense({
+                    amount: task.amount,
+                    date: task.expenseDate,
+                    category: task.category,
+                    description: task.description || '',
+                    method: task.method || 'cash',
+                  });
+                  tasks.clear(senderKey);
+                  trackLastEntry(senderKey, { ok: true, id: res.id, type: 'expense', partyName: expenseCategoryLabel(task.category), amount: task.amount });
+                  await sendText(remoteJid, `✅ *Expense Saved*\n${expenseCategoryLabel(task.category)} — ${formatRs(task.amount)}\n\nType *expense* for another, *today* for closing.`, msg);
+                } catch (e) {
+                  tasks.clear(senderKey);
+                  await sendText(remoteJid, `❌ Could not save expense: ${e.message}`, msg);
+                }
+                return;
+              }
+              if (['no', 'nahi', 'nahin', 'na', 'n', '2'].includes(low)) {
+                tasks.clear(senderKey);
+                await sendText(remoteJid, '❌ Expense not saved.', msg);
+                return;
+              }
+              await sendText(remoteJid, '❓ Type *yes* to save, *no* to cancel.', msg);
+              return;
+            }
+          }
+
+          tasks.clear(senderKey);
+          await sendText(remoteJid, '❌ Process reset. Type *help* to see commands.', msg);
+        }
+
 
         // ── bill queue: one active bill per sender, the rest wait their turn ──
         function getBillQueue() {
@@ -649,6 +937,11 @@ async function startBot() {
           await startBillFlow(next);
         }
 
+        if (media && tasks.get(senderKey)) {
+          await sendText(remoteJid, '⚠️ Ek process pehle se chal raha hai.\nPehle usay complete karein, ya *cancel* likh kar band karein.', msg);
+          continue;
+        }
+
         if (media) {
           // ── a bill photo/PDF arrived ──
           let buffer;
@@ -684,8 +977,15 @@ async function startBot() {
           continue;
         }
 
+        // ── one clean command at a time: never mix workflows ──
+        const botCommand = parseBotCommand(text);
+        if (botCommand && botCommand !== 'undo' && (convos.get(senderKey) || tasks.get(senderKey))) {
+          await sendText(remoteJid, '⚠️ Ek process pehle se chal raha hai.\nPehle usay complete karein, ya *cancel* likh kar band karein.', msg);
+          continue;
+        }
+
         // ── "undo": delete the last entry this bot created for this sender (30 min window) ──
-        if (['undo', 'undo karo'].includes(text.toLowerCase().trim()) && !convos.get(senderKey)) {
+        if (botCommand === 'undo' && !convos.get(senderKey) && !tasks.get(senderKey)) {
           const last = lastEntries.get(senderKey);
           if (!last || Date.now() - last.at > UNDO_TTL_MS) {
             await sendText(remoteJid, '❓ No recent entry found to undo.\n(Only entries made by the bot in the last 30 min can be undone.)', msg);
@@ -694,7 +994,7 @@ async function startBot() {
           try {
             await client.deleteEntry(last.type, last.id);
             lastEntries.delete(senderKey);
-            const typeLabel = last.type === 'sale' ? 'Sales' : last.type === 'purchase' ? 'Purchase' : last.type === 'payment' ? 'Payment' : 'Receipt';
+            const typeLabel = last.type === 'sale' ? 'Sales' : last.type === 'purchase' ? 'Purchase' : last.type === 'payment' ? 'Payment' : last.type === 'expense' ? 'Expense' : last.type === 'party' ? 'Party' : 'Receipt';
             await sendText(remoteJid, `🗑️ *Entry deleted:*\n🏪 ${last.partyName}\n💰 ${formatRs(last.amount)} (${typeLabel})`, msg);
             console.log(`↩️ undo: deleted ${last.type} #${last.id} (${last.partyName} ${last.amount})`);
           } catch (e) {
@@ -705,7 +1005,7 @@ async function startBot() {
         }
 
         // ── "bill": start the same guided entry flow without a photo ──
-        if (isBillCommand(text) && !convos.get(senderKey)) {
+        if (isBillCommand(text) && !convos.get(senderKey) && !tasks.get(senderKey)) {
           const parties = await needParties();
           if (!parties) continue;
           if (!parties.length) {
@@ -718,17 +1018,45 @@ async function startBot() {
           continue;
         }
 
+        if (botCommand === 'help') {
+          await sendText(remoteJid, helpText(), msg);
+          continue;
+        }
+        if (botCommand === 'today') {
+          await sendTodaySummary();
+          continue;
+        }
+        if (botCommand === 'dues') {
+          await sendDuesSummary();
+          continue;
+        }
+        if (botCommand === 'newparty') {
+          await startNewPartyTask();
+          continue;
+        }
+        if (botCommand === 'expense') {
+          await startExpenseTask();
+          continue;
+        }
+
         // ── a text message arrived: part of an active step-by-step session? ──
         const sess = convos.get(senderKey);
-        if (!sess) continue; // no session → stay silent (old caption-only texts are ignored now)
+        const task = tasks.get(senderKey);
+        if (!sess && !task) continue; // no session → stay silent (ordinary text is ignored)
 
         const low = text.toLowerCase().trim();
         if (low === 'cancel all' || low === 'cancel queue') {
           convos.clear(senderKey);
+          tasks.clear(senderKey);
           mediaQueues.delete(senderKey);
           await sendText(remoteJid, '❌ Everything cancelled — queue cleared too.', msg);
           continue;
         }
+        if (task) {
+          await handleTaskMessage(task, text);
+          continue;
+        }
+        if (!sess) continue;
         if (CANCEL_WORDS.has(low)) {
           convos.clear(senderKey);
           const left = mediaQueues.get(senderKey)?.length || 0;
@@ -759,11 +1087,11 @@ async function startBot() {
                 partyId: party.id, partyName: party.name, entryType: shortcut.type,
                 amount: shortcut.amount, description: '', entryDate: today, dup: true,
               });
-              console.log(`📩 caption shortcut in "${subject}": "${text.slice(0, 80)}" — duplicate suspected`);
+              console.log(`📩 caption shortcut in "${binding.name}": "${text.slice(0, 80)}" — duplicate suspected`);
               await sendText(remoteJid, dupPrompt(party.name, shortcut.type, shortcut.amount, today), msg);
             } else {
               convos.clear(senderKey);
-              console.log(`📩 caption shortcut in "${subject}": "${text.slice(0, 80)}"`);
+              console.log(`📩 caption shortcut in "${binding.name}": "${text.slice(0, 80)}"`);
               const res = await processBill(remoteJid, msg, shortcut, s.media ? s.media.buffer : null, s.media, undefined, undefined, client);
               trackLastEntry(senderKey, res);
             }
@@ -806,6 +1134,17 @@ async function startBot() {
             await sendText(remoteJid, '❌ Enter a valid amount (e.g. 50000).', msg);
             continue;
           }
+          const needsMethod = sess.entryType === 'receipt' || sess.entryType === 'payment';
+          if (needsMethod) {
+            convos.setStep(senderKey, STEPS.METHOD, { amount, description, descriptionReady: !!description });
+            console.log(`👉 amount entered: ${amount} — asking method`);
+            await sendText(
+              remoteJid,
+              `✅ Amount: ${formatRs(amount)}${description ? `\n📝 ${description}` : ''}\n\n${methodPrompt(sess.entryType === 'receipt' ? 'Received by' : 'Paid by')}`,
+              msg
+            );
+            continue;
+          }
           if (description) {
             // amount ke saath description bhi bhej di — seedha date pe jao
             convos.setStep(senderKey, STEPS.DATE, { amount, description });
@@ -824,6 +1163,32 @@ async function startBot() {
             `✅ Amount: ${formatRs(amount)}\n\n📝 Now write a *description* (optional):\n\nType "skip" to skip.\n\n❌ Type "cancel" to cancel`,
             msg
           );
+          continue;
+        }
+
+        if (sess.step === STEPS.METHOD) {
+          const method = parseMethodSelection(text);
+          if (!method) {
+            await sendText(remoteJid, '❌ Send *1* Cash, *2* JazzCash, *3* EasyPaisa, or *4* Bank.', msg);
+            continue;
+          }
+          const s = convos.get(senderKey);
+          console.log(`👉 method chosen: ${method}`);
+          if (s.descriptionReady) {
+            convos.setStep(senderKey, STEPS.DATE, { method });
+            await sendText(
+              remoteJid,
+              `✅ Amount: ${formatRs(s.amount)}\n💳 Method: ${methodLabel(method)}${s.description ? `\n📝 ${s.description}` : ''}\n\n📅 What is the bill *date*?\nType *today*, or a custom date (e.g. 28-09-2026):\n\n❌ Type "cancel" to cancel`,
+              msg
+            );
+          } else {
+            convos.setStep(senderKey, STEPS.DESCRIPTION, { method });
+            await sendText(
+              remoteJid,
+              `✅ Amount: ${formatRs(s.amount)}\n💳 Method: ${methodLabel(method)}\n\n📝 Now write a *description* (optional):\n\nType "skip" to skip.\n\n❌ Type "cancel" to cancel`,
+              msg
+            );
+          }
           continue;
         }
 

@@ -11,6 +11,7 @@ export const STEPS = {
   PARTY: 'party',
   TYPE: 'type',
   AMOUNT: 'amount',
+  METHOD: 'method',
   DESCRIPTION: 'description',
   DATE: 'date',
   CONFIRM: 'confirm',
@@ -73,6 +74,16 @@ export function createConvoStore(ttlMs = CONVO_TTL_MS) {
       return map.size;
     },
   };
+}
+
+// Opening balance can be negative (purchaser ko dena hai). "skip"/"0" -> 0.
+export function parseOpeningBalance(text) {
+  const t = String(text || '').trim().toLowerCase();
+  if (!t || ['skip', '-', 'nahi', 'nahin', 'no', '0'].includes(t)) return 0;
+  const negative = t.startsWith('-');
+  const v = parseAmount(negative ? t.slice(1) : t);
+  if (v === null) return null;
+  return negative ? -v : v;
 }
 
 // "50,000" / "Rs 50000.50" / "50000" -> 50000 ; null when not a positive amount

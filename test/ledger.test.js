@@ -348,3 +348,57 @@ test('createPurchase without photo sends JSON (bill command flow)', async () => 
   assert.equal(seenBody.amount, 12000);
   assert.ok(!('photo' in seenBody), 'photo-less purchase must not carry a photo field');
 });
+
+test('createReceipt and photo-less createPayment send payment method', async () => {
+  const seen = [];
+  const f = mockFetch([
+    { match: isLogin, ...LOGIN },
+    {
+      match: (url, opts) => {
+        if (opts.method === 'POST' && (url.includes('/api/receipts') || url.includes('/api/payments'))) {
+          seen.push({ url, body: JSON.parse(opts.body) });
+          return true;
+        }
+        return false;
+      },
+      status: 200, json: { ok: true, id: 22 },
+    },
+  ]);
+  const c = createLedgerClient({ baseUrl: 'https://x.test', password: 'dummy', fetchImpl: f });
+  await c.createReceipt({ partyId: 1, amount: 1000, date: '2026-10-10', description: 'test', method: 'jazzcash' });
+  await c.createPayment({ partyId: 1, amount: 2000, date: '2026-10-10', description: 'test', method: 'bank' });
+  assert.equal(seen[0].body.method, 'jazzcash');
+  assert.equal(seen[1].body.method, 'bank');
+});
+
+test('createParty, createExpense and getToday hit the right endpoints', async () => {
+  const seen = [];
+  const f = mockFetch([
+    { match: isLogin, ...LOGIN },
+    {
+      match: (url, opts) => {
+        if (url.includes('/api/parties') && opts.method === 'POST') { seen.push(JSON.parse(opts.body)); return true; }
+        return false;
+      },
+      status: 200, json: { ok: true, id: 8 },
+    },
+    {
+      match: (url, opts) => {
+        if (url.includes('/api/expenses') && opts.method === 'POST') { seen.push(JSON.parse(opts.body)); return true; }
+        return false;
+      },
+      status: 200, json: { ok: true, id: 9 },
+    },
+    {
+      match: (url) => url.includes('/api/today?date=2026-10-10'),
+      status: 200, json: { totals: { sales: 100 }, cash_movement: 100 },
+    },
+  ]);
+  const c = createLedgerClient({ baseUrl: 'https://x.test', password: 'dummy', fetchImpl: f });
+  await c.createParty({ name: 'New Store', phone: '03001234567', opening_balance: -500, party_type: 'supplier' });
+  await c.createExpense({ amount: 700, date: '2026-10-10', category: 'rent', description: '', method: 'cash' });
+  assert.equal(seen[0].party_type, 'supplier');
+  assert.equal(seen[1].category, 'rent');
+  const today = await c.getToday('2026-10-10');
+  assert.equal(today.cash_movement, 100);
+});

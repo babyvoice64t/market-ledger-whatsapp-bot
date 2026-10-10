@@ -6,6 +6,7 @@ import {
   STEPS,
   parseAmount,
   parseAmountAndDescription,
+  parseOpeningBalance,
   parseDateInput,
   parseSelection,
   formatPartyList,
@@ -156,4 +157,13 @@ test('CANCEL_WORDS contains cancel variants', () => {
 
 test('CONVO_TTL_MS is 10 minutes', () => {
   assert.equal(CONVO_TTL_MS, 10 * 60 * 1000);
+});
+
+test('parseOpeningBalance accepts signed and skipped balances', () => {
+  assert.equal(parseOpeningBalance('5000'), 5000);
+  assert.equal(parseOpeningBalance('-5000'), -5000);
+  assert.equal(parseOpeningBalance('Rs 12,500'), 12500);
+  assert.equal(parseOpeningBalance('skip'), 0);
+  assert.equal(parseOpeningBalance('0'), 0);
+  assert.equal(parseOpeningBalance('abc'), null);
 });

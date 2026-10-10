@@ -130,7 +130,7 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, login
     return j;
   }
 
-  async function createPayment({ partyId, amount, date, description, photoBuffer, filename, mimetype }) {
+  async function createPayment({ partyId, amount, date, description, photoBuffer, filename, mimetype, method = 'cash' }) {
     const t = await ensureToken();
     // photo optional: agar hai to pehle Cloudinary pe upload karo (receipt wala flow)
     let photoUrl = '';
@@ -140,6 +140,7 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, login
       form.append('party_id', String(partyId));
       form.append('amount', String(amount));
       form.append('date', date);
+      form.append('method', method || 'cash');
       if (description) form.append('description', description);
       form.append('photo', new Blob([photoBuffer], { type: mimetype || 'image/jpeg' }), filename || 'payment.jpg');
       const r = await fetchImpl(base + '/api/payments', { method: 'POST', body: form });
@@ -150,22 +151,53 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, login
     const r = await fetchImpl(base + '/api/payments', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: t, party_id: partyId, amount, date, description }),
+      body: JSON.stringify({ password: t, party_id: partyId, amount, date, description, method: method || 'cash' }),
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) throw new Error(j.error || 'payment request failed');
     return j;
   }
 
-  async function createReceipt({ partyId, amount, date, description }) {
+  async function createReceipt({ partyId, amount, date, description, method = 'cash' }) {
     const t = await ensureToken();
     const r = await fetchImpl(`${base}/api/receipts`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: t, party_id: partyId, amount, date, description }),
+      body: JSON.stringify({ password: t, party_id: partyId, amount, date, description, method: method || 'cash' }),
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) throw new Error(j.error || 'receipt request failed');
+    return j;
+  }
+
+  async function createParty({ name, phone = '', address = '', opening_balance = 0, party_type = 'customer' }) {
+    const t = await ensureToken();
+    const r = await fetchImpl(`${base}/api/parties`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: t, name, phone, address, opening_balance, party_type }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) throw new Error(j.error || 'party request failed');
+    return j;
+  }
+
+  async function createExpense({ amount, date, category, description, method = 'cash' }) {
+    const t = await ensureToken();
+    const r = await fetchImpl(`${base}/api/expenses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: t, amount, date, category, description, method }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) throw new Error(j.error || 'expense request failed');
+    return j;
+  }
+
+  async function getToday(date) {
+    const r = await authedGet(`/api/today?date=${encodeURIComponent(date)}`);
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || 'today request failed');
     return j;
   }
 
@@ -207,6 +239,8 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, login
       purchase: 'purchases',
       receipt: 'receipts',
       payment: 'payments',
+      expense: 'expenses',
+      party: 'parties',
     };
     const endpoint = endpointByType[entryType];
     if (!endpoint) throw new Error(`unknown entry type: ${entryType}`);
@@ -235,6 +269,9 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, login
     createPurchase,
     createPayment,
     createReceipt,
+    createParty,
+    createExpense,
+    getToday,
     getRecentEntries,
     deleteEntry,
   };

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseActivateCommand, isBillCommand } from '../botcmd.js';
+import { parseActivateCommand, isBillCommand, parseBotCommand, parseMethodSelection, methodLabel } from '../botcmd.js';
 
 test('parses "activate <id> <password>"', () => {
   assert.deepEqual(parseActivateCommand('activate ali123 secret1'), { username: 'ali123', password: 'secret1' });
@@ -43,4 +43,25 @@ test('other text is not the bill command', () => {
   assert.equal(isBillCommand('sale'), false);
   assert.equal(isBillCommand(''), false);
   assert.equal(isBillCommand('50000'), false);
+});
+
+test('parseBotCommand accepts only exact professional commands', () => {
+  assert.equal(parseBotCommand('bill'), 'bill');
+  assert.equal(parseBotCommand('  New Party '), 'newparty');
+  assert.equal(parseBotCommand('add party'), 'newparty');
+  assert.equal(parseBotCommand('KHARCHA'), 'expense');
+  assert.equal(parseBotCommand('daily closing'), 'today');
+  assert.equal(parseBotCommand('udhar'), 'dues');
+  assert.equal(parseBotCommand('menu'), 'help');
+  assert.equal(parseBotCommand('please bill'), null);
+  assert.equal(parseBotCommand('hello'), null);
+});
+
+test('parseMethodSelection handles numbers and names', () => {
+  assert.equal(parseMethodSelection('1'), 'cash');
+  assert.equal(parseMethodSelection('2'), 'jazzcash');
+  assert.equal(parseMethodSelection('EasyPaisa'), 'easypaisa');
+  assert.equal(parseMethodSelection('bank transfer'), 'bank');
+  assert.equal(parseMethodSelection('cheque'), null);
+  assert.equal(methodLabel('jazzcash'), 'JazzCash');
 });
