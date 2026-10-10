@@ -298,3 +298,53 @@ test('user login blocked account carries 403', async () => {
   const c = createUserLedgerClient({ baseUrl: 'https://x.test', username: 'ali123', password: 'pw1', fetchImpl: f });
   await assert.rejects(() => c.ensureToken(), (e) => e.status === 403);
 });
+
+test('createSale without photo sends JSON (bill command flow)', async () => {
+  let seenBody = null;
+  const f = mockFetch([
+    { match: isLogin, ...LOGIN },
+    {
+      match: (url, opts) => {
+        if (url.includes('/api/sales') && opts.method === 'POST') {
+          seenBody = JSON.parse(opts.body); return true;
+        }
+        return false;
+      },
+      status: 200, json: { ok: true, id: 11 },
+    },
+  ]);
+  const c = createLedgerClient({ baseUrl: 'https://x.test', password: 'dummy', fetchImpl: f });
+  const res = await c.createSale({
+    partyId: 3, amount: 7500, date: '2026-10-10',
+    description: 'Added via WhatsApp', photoBuffer: null, filename: 'bill.jpg',
+  });
+  assert.equal(res.ok, true);
+  assert.equal(seenBody.party_id, 3);
+  assert.equal(seenBody.amount, 7500);
+  assert.ok(!('photo' in seenBody), 'photo-less sale must not carry a photo field');
+});
+
+test('createPurchase without photo sends JSON (bill command flow)', async () => {
+  let seenBody = null;
+  const f = mockFetch([
+    { match: isLogin, ...LOGIN },
+    {
+      match: (url, opts) => {
+        if (url.includes('/api/purchases') && opts.method === 'POST') {
+          seenBody = JSON.parse(opts.body); return true;
+        }
+        return false;
+      },
+      status: 200, json: { ok: true, id: 12 },
+    },
+  ]);
+  const c = createLedgerClient({ baseUrl: 'https://x.test', password: 'dummy', fetchImpl: f });
+  const res = await c.createPurchase({
+    partyId: 4, amount: 12000, date: '2026-10-10',
+    description: 'Added via WhatsApp', photoBuffer: null, filename: 'bill.jpg',
+  });
+  assert.equal(res.ok, true);
+  assert.equal(seenBody.party_id, 4);
+  assert.equal(seenBody.amount, 12000);
+  assert.ok(!('photo' in seenBody), 'photo-less purchase must not carry a photo field');
+});

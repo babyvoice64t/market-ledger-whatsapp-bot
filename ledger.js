@@ -78,9 +78,19 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, login
     return j.totals && typeof j.totals.balance === 'number' ? j.totals.balance : 0;
   }
 
-  // Sales need the bill file (backend uploads it to Cloudinary).
+  // Sale: photo ke saath multipart, baghair photo JSON (photo optional hai).
   async function createSale({ partyId, amount, date, description, photoBuffer, filename, mimetype }) {
     const t = await ensureToken();
+    if (!photoBuffer) {
+      const r = await fetchImpl(base + '/api/sales', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: t, party_id: partyId, amount, date, description }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || 'sale request failed');
+      return j;
+    }
     const form = new FormData();
     form.append('password', t);
     form.append('party_id', String(partyId));
@@ -94,9 +104,19 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, login
     return j;
   }
 
-  // Purchases need the bill file (backend uploads it to Cloudinary), same as sales.
+  // Purchase: photo ke saath multipart, baghair photo JSON (photo optional hai).
   async function createPurchase({ partyId, amount, date, description, photoBuffer, filename, mimetype }) {
     const t = await ensureToken();
+    if (!photoBuffer) {
+      const r = await fetchImpl(base + '/api/purchases', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: t, party_id: partyId, amount, date, description }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || 'purchase request failed');
+      return j;
+    }
     const form = new FormData();
     form.append('password', t);
     form.append('party_id', String(partyId));

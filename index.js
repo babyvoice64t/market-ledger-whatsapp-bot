@@ -23,7 +23,7 @@ import { v2 as cloudinary } from 'cloudinary';
 import { randomBytes } from 'node:crypto';
 import { parseCaption, formatRs, USAGE_TEXT } from './parser.js';
 import { createLedgerClient, createUserLedgerClient } from './ledger.js';
-import { parseActivateCommand } from './botcmd.js';
+import { parseActivateCommand, isBillCommand } from './botcmd.js';
 import { createConvoStore, STEPS, parseAmountAndDescription, parseSelection, parseDateInput, formatPartyList, CANCEL_WORDS } from './convo.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -149,7 +149,7 @@ app.get('/qr', async (req, res) => {
   res.json({ qr: qrDataUrl, connected: isConnected, groups: groupBindings.size });
 });
 
-app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, groups: groupBindings.size, version: '2.8.1' }));
+app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, groups: groupBindings.size, version: '2.9.0' }));
 
 // ─── Helpers ───
 function msgKeyId(key) { return `${key.remoteJid}:${key.id}`; }
@@ -289,7 +289,8 @@ const UNDO_TTL_MS = 30 * 60 * 1000;
 const mediaQueues = new Map();
 const MAX_QUEUE = 10;
 async function processBill(groupJid, msg, parsed, buffer, media, description, entryDate, client) {
-  const kind = media?.kind || 'image';
+  const hasMedia = !!buffer;
+  const kind = media?.kind || (hasMedia ? 'image' : 'text');
   const mimetype = media?.mimetype || 'image/jpeg';
   const filename = media?.filename || `bill_${Date.now()}.jpg`;
   const date = entryDate || todayPK();
@@ -331,11 +332,13 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
       entryId = res && res.id != null ? res.id : null;
     } else {
       let photoUrl = '';
-      try {
-        photoUrl = await uploadMedia(buffer, mimetype);
-      } catch (e) {
-        photoFailed = true;
-        console.error('receipt file upload fail:', e.message);
+      if (hasMedia) {
+        try {
+          photoUrl = await uploadMedia(buffer, mimetype);
+        } catch (e) {
+          photoFailed = true;
+          console.error('receipt file upload fail:', e.message);
+        }
       }
       const res = await L.createReceipt({
         partyId: party.id,
@@ -356,7 +359,9 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
     }
     if (balance !== null) lines.push(`📊 Balance: ${formatRs(balance)}`);
     const caption = lines.join('\n');
-    if (kind === 'pdf') {
+    if (!hasMedia) {
+      await sendText(groupJid, caption, msg);
+    } else if (kind === 'pdf') {
       await sock.sendMessage(
         groupJid,
         { document: buffer, mimetype: 'application/pdf', fileName: filename, caption },
@@ -576,7 +581,7 @@ async function startBot() {
             `👉 creating ${s.entryType}: ${s.partyName} ${s.amount} date=${s.entryDate}` +
               (s.description ? ` desc=${s.description.slice(0, 40)}` : '')
           );
-          const res = await processBill(remoteJid, msg, parsed, s.media.buffer, s.media, s.description, s.entryDate, client);
+          const res = await processBill(remoteJid, msg, parsed, s.media ? s.media.buffer : null, s.media, s.description, s.entryDate, client);
           trackLastEntry(senderKey, res);
           await advanceQueue(); // start the next queued bill, if any
         }
@@ -699,6 +704,20 @@ async function startBot() {
           continue;
         }
 
+        // ── "bill": start the same guided entry flow without a photo ──
+        if (isBillCommand(text) && !convos.get(senderKey)) {
+          const parties = await needParties();
+          if (!parties) continue;
+          if (!parties.length) {
+            await sendText(remoteJid, `⚠️ No parties in the portal yet. Add a party in the portal first: ${LEDGER_URL}/`, msg);
+            continue;
+          }
+          convos.start(senderKey, null);
+          console.log(`🧾 "bill" command in "${binding.name}" — asking party`);
+          await sendText(remoteJid, `🧾 New entry — no photo needed.\n\n${partyListPrompt(parties)}`, msg);
+          continue;
+        }
+
         // ── a text message arrived: part of an active step-by-step session? ──
         const sess = convos.get(senderKey);
         if (!sess) continue; // no session → stay silent (old caption-only texts are ignored now)
@@ -715,7 +734,11 @@ async function startBot() {
           const left = mediaQueues.get(senderKey)?.length || 0;
           await sendText(
             remoteJid,
-            left ? `❌ This bill is cancelled. Starting the next bill in the queue…` : '❌ Cancelled. Send a photo/PDF again for a new bill.',
+            left
+              ? `❌ This bill is cancelled. Starting the next bill in the queue…`
+              : sess && !sess.media
+                ? '❌ Cancelled. Type "bill" again for a new entry.'
+                : '❌ Cancelled. Send a photo/PDF again for a new bill.',
             msg
           );
           await advanceQueue();
@@ -741,7 +764,7 @@ async function startBot() {
             } else {
               convos.clear(senderKey);
               console.log(`📩 caption shortcut in "${subject}": "${text.slice(0, 80)}"`);
-              const res = await processBill(remoteJid, msg, shortcut, s.media.buffer, s.media, undefined, undefined, client);
+              const res = await processBill(remoteJid, msg, shortcut, s.media ? s.media.buffer : null, s.media, undefined, undefined, client);
               trackLastEntry(senderKey, res);
             }
             continue;

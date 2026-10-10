@@ -2,6 +2,13 @@
 //   activate <user-id> <password>  -> { username, password }
 //   activate (bare)                 -> { usage: true }
 // Anything else -> null.
+// The guided entry flow can also start without a photo: typing just "bill"
+// in a bound group opens the same party → type → amount → description → date
+// steps. Anything else is not a bill command.
+export function isBillCommand(text) {
+  return /^bill$/i.test(String(text || '').trim());
+}
+
 export function parseActivateCommand(text) {
   const t = String(text || '').trim();
   const m = t.match(/^activate\s+(\S+)\s+(.+?)\s*$/i);
