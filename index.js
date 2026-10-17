@@ -703,6 +703,7 @@ async function startBot() {
           const low = textValue.toLowerCase();
           if (CANCEL_WORDS.has(low)) {
             tasks.clear(senderKey);
+            convos.clear(senderKey);
             await sendText(remoteJid, '❌ Cancelled. Type *help* to see commands.', msg);
             return;
           }
@@ -1059,6 +1060,7 @@ async function startBot() {
         if (!sess) continue;
         if (CANCEL_WORDS.has(low)) {
           convos.clear(senderKey);
+          tasks.clear(senderKey);
           const left = mediaQueues.get(senderKey)?.length || 0;
           await sendText(
             remoteJid,
