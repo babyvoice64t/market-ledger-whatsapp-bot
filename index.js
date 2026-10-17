@@ -939,8 +939,16 @@ async function startBot() {
         }
 
         if (media && tasks.get(senderKey)) {
-          await sendText(remoteJid, '⚠️ Ek process pehle se chal raha hai.\nPehle usay complete karein, ya *cancel* likh kar band karein.', msg);
-          continue;
+          const stuckTask = tasks.get(senderKey);
+          console.log(`⚠️ BLOCKED media: stuck task flow=${stuckTask.flow} step=${stuckTask.step} age=${Math.round((Date.now()-stuckTask.at)/1000)}s senderKey=${senderKey}`);
+          // auto-heal: if task is older than 2 min, clear it automatically
+          if (Date.now() - stuckTask.at > 2 * 60 * 1000) {
+            console.log(`🔧 auto-clearing stale task for ${senderKey}`);
+            tasks.clear(senderKey);
+          } else {
+            await sendText(remoteJid, '⚠️ Ek process pehle se chal raha hai.\nPehle usay complete karein, ya *cancel* likh kar band karein.', msg);
+            continue;
+          }
         }
 
         if (media) {
