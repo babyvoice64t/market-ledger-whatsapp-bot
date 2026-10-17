@@ -984,8 +984,11 @@ async function startBot() {
         // ── one clean command at a time: never mix workflows ──
         const botCommand = parseBotCommand(text);
         if (botCommand && botCommand !== 'undo' && (convos.get(senderKey) || tasks.get(senderKey))) {
-          await sendText(remoteJid, '⚠️ Ek process pehle se chal raha hai.\nPehle usay complete karein, ya *cancel* likh kar band karein.', msg);
-          continue;
+          // Auto-clear stuck sessions instead of blocking: bills/commands take priority
+          console.log(`🔧 auto-clear stuck session for new command "${botCommand}" from ${senderKey}`);
+          convos.clear(senderKey);
+          tasks.clear(senderKey);
+          mediaQueues.delete(senderKey);
         }
 
         // ── "undo": delete the last entry this bot created for this sender (30 min window) ──
