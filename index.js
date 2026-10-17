@@ -981,16 +981,19 @@ async function startBot() {
           continue;
         }
 
-        // ── active session gets priority: route to session handler first ──
-        // (a "today"/"cancel" typed during bill flow is a DATE/answer, not a command!)
+        // ── session priority: in a bill/party/expense flow, text is an ANSWER not a command ──
+        // ("today" at bill-date step = the date, NOT the today command!)
         const _sess = convos.get(senderKey);
         const _task = tasks.get(senderKey);
         const _inSession = !!(_sess || _task);
         // ── one clean command at a time: never mix workflows ──
-        const botCommand = parseBotCommand(text);
-        // Only treat as a NEW command if NOT in an active session
-        // (if in session, the session handler below will process it)
-        if (botCommand && !_inSession && botCommand !== 'undo' && (convos.get(senderKey) || tasks.get(senderKey))) {
+        let botCommand = parseBotCommand(text);
+        // In-session: null out botCommand so handlers below are skipped;
+        // the session handler gets the raw text as the answer.
+        // (cancel is handled by the session handler via CANCEL_WORDS.)
+        if (_inSession) {
+          botCommand = null;
+        } else if (botCommand && botCommand !== 'undo' && (convos.get(senderKey) || tasks.get(senderKey))) {
           // Auto-clear stuck sessions instead of blocking: bills/commands take priority
           console.log(`🔧 auto-clear stuck session for new command "${botCommand}" from ${senderKey}`);
           convos.clear(senderKey);
