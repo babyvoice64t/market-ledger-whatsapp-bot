@@ -290,7 +290,7 @@ const UNDO_TTL_MS = 30 * 60 * 1000;
 // senderKey -> bills waiting their turn (one active bill per sender at a time)
 const mediaQueues = new Map();
 const MAX_QUEUE = 10;
-async function processBill(groupJid, msg, parsed, buffer, media, description, entryDate, client) {
+async function processBill(groupJid, msg, parsed, buffer, media, description, entryDate, client, knownParty) {
   const hasMedia = !!buffer;
   const kind = media?.kind || (hasMedia ? 'image' : 'text');
   const mimetype = media?.mimetype || 'image/jpeg';
@@ -298,16 +298,19 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
   const date = entryDate || todayPK();
   const desc = String(description || '').trim() || 'Added via WhatsApp';
   const L = client; // this group's bound customer ledger
-  let parties;
-  try {
-    parties = await L.getParties();
-  } catch (e) {
-    console.error('getParties fail:', e.message);
-    await sendText(groupJid, '❌ Could not connect to the portal. Retry in a bit.', msg);
-    return { ok: false };
+  // Guided flow already knows the party — skip the extra getParties() round trip (speed fix).
+  let party = knownParty && knownParty.id != null ? { id: knownParty.id, name: knownParty.name } : null;
+  if (!party) {
+    let parties;
+    try {
+      parties = await L.getParties();
+    } catch (e) {
+      console.error('getParties fail:', e.message);
+      await sendText(groupJid, '❌ Could not connect to the portal. Retry in a bit.', msg);
+      return { ok: false };
+    }
+    party = L.findParty(parties, parsed.partyName);
   }
-
-  const party = L.findParty(parties, parsed.partyName);
   if (!party) {
     await sendText(
       groupJid,
@@ -588,7 +591,7 @@ async function startBot() {
             `👉 creating ${s.entryType}: ${s.partyName} ${s.amount} date=${s.entryDate}` +
               (s.description ? ` desc=${s.description.slice(0, 40)}` : '')
           );
-          const res = await processBill(remoteJid, msg, parsed, s.media ? s.media.buffer : null, s.media, s.description, s.entryDate, client);
+          const res = await processBill(remoteJid, msg, parsed, s.media ? s.media.buffer : null, s.media, s.description, s.entryDate, client, { id: s.partyId, name: s.partyName });
           trackLastEntry(senderKey, res);
           await advanceQueue(); // start the next queued bill, if any
         }
