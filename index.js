@@ -186,6 +186,33 @@ async function sendText(groupJid, text, quoted) {
   await sock.sendMessage(groupJid, { text }, quoted ? { quoted } : undefined);
 }
 
+// ── photo shrink (speed): phone photos are 2-5 MB; on the tiny free CPU every
+// upload leg (bot->portal, portal->Cloudinary, bot->WhatsApp card) is slow.
+// Downscale once to 1600px JPEG (~300-500 KB, bills stay fully readable) and
+// reuse that buffer everywhere. Any failure falls back to the original photo.
+let _sharp = null, _sharpTried = false;
+async function getSharp() {
+  if (_sharpTried) return _sharp;
+  _sharpTried = true;
+  try { _sharp = (await import('sharp')).default; } catch { _sharp = null; }
+  return _sharp;
+}
+async function shrinkImage(buffer, mimetype) {
+  if (!buffer || !/^image\//i.test(mimetype || '')) return buffer;
+  const sharp = await getSharp();
+  if (!sharp) return buffer;
+  try {
+    const meta = await sharp(buffer).metadata();
+    if (!meta.width || meta.width <= 1600) return buffer;
+    const out = await sharp(buffer).rotate().resize({ width: 1600, withoutEnlargement: true }).jpeg({ quality: 82 }).toBuffer();
+    console.log(`🗜️ photo shrunk: ${Math.round(buffer.length / 1024)}KB -> ${Math.round(out.length / 1024)}KB`);
+    return out;
+  } catch (e) {
+    console.error('shrink fail (using original):', e.message);
+    return buffer;
+  }
+}
+
 // Receipt attachments: the /api/receipts endpoint has no file field, so the bot
 // uploads the bill file to Cloudinary (folder market-ledger/) itself and appends
 // the URL to the receipt description. Works for images and PDFs.
@@ -925,6 +952,7 @@ async function startBot() {
             return;
           }
           convos.start(senderKey, { buffer: item.buffer, mimetype: item.mimetype, filename: item.filename, kind: item.kind });
+          const _csA = convos.get(senderKey); if (_csA) _csA.parties = parties;
           const label = item.kind === 'pdf' ? 'PDF' : 'Photo';
           console.log(`📩 bill ${item.kind} in "${binding.name}" — asking party`);
           await sendText(remoteJid, `📸 ${label} received!\n\n${partyListPrompt(parties)}`, msg);
@@ -960,6 +988,10 @@ async function startBot() {
             continue;
           }
           const item = { buffer, mimetype: media.mimetype, filename: media.filename, kind: media.kind, caption: media.caption };
+          if (media.kind === 'image') {
+            item.buffer = await shrinkImage(item.buffer, item.mimetype);
+            if (item.buffer !== buffer) { item.mimetype = 'image/jpeg'; item.filename = String(item.filename).replace(/\.\w+$/, '.jpg'); }
+          }
           if (convos.get(senderKey)) {
             // busy with another bill → queue this one, it starts automatically later
             const q = getBillQueue();
@@ -1033,6 +1065,7 @@ async function startBot() {
             continue;
           }
           convos.start(senderKey, null);
+          const _csB = convos.get(senderKey); if (_csB) _csB.parties = parties;
           console.log(`🧾 "bill" command in "${binding.name}" — asking party`);
           await sendText(remoteJid, `🧾 New entry — no photo needed.\n\n${partyListPrompt(parties)}`, msg);
           continue;
@@ -1099,7 +1132,7 @@ async function startBot() {
           const shortcut = parseCaption(text);
           if (shortcut.ok) {
             const s = convos.get(senderKey);
-            const parties = await needParties();
+            const parties = sess.parties || (await needParties());
             const today = todayPK();
             const party = parties ? client.findParty(parties, shortcut.partyName) : null;
             const dup = party ? await findDuplicate(party.id, shortcut.type, shortcut.amount, today) : null;
@@ -1118,7 +1151,7 @@ async function startBot() {
             }
             continue;
           }
-          const parties = await needParties();
+          const parties = sess.parties || (await needParties());
           if (!parties) { convos.clear(senderKey); continue; }
           const n = parseSelection(text, Math.min(parties.length, 50));
           if (!n) {
