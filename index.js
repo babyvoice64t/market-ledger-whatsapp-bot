@@ -151,7 +151,7 @@ app.get('/qr', async (req, res) => {
   res.json({ qr: qrDataUrl, connected: isConnected, groups: groupBindings.size });
 });
 
-app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, groups: groupBindings.size, version: '2.10.2' }));
+app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, groups: groupBindings.size, version: '2.11.0' }));
 
 // ─── Helpers ───
 function msgKeyId(key) { return `${key.remoteJid}:${key.id}`; }
@@ -213,6 +213,42 @@ async function shrinkImage(buffer, mimetype) {
   }
 }
 
+// ─── Media job semaphore ───
+// A media job = download + shrink of ONE bill photo. At most 2 run at once:
+// on the 0.1 vCPU / 256 MB sandbox, unbounded parallel downloads + full-res
+// decodes can OOM the process and take the bot offline for EVERY customer.
+// Extra jobs wait for a free slot; the conversation flow never waits on a
+// job — only the save does. A job NEVER rejects: a failed download resolves
+// as { buffer: null, shrunk: null } and processBill saves without the photo.
+const MAX_MEDIA_JOBS = 2;
+let mediaJobsActive = 0;
+const mediaJobWaiters = [];
+function acquireMediaSlot() {
+  if (mediaJobsActive < MAX_MEDIA_JOBS) {
+    mediaJobsActive++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => mediaJobWaiters.push(resolve));
+}
+function releaseMediaSlot() {
+  const next = mediaJobWaiters.shift();
+  if (next) next(); // hand the slot straight to the waiting job
+  else mediaJobsActive--;
+}
+async function runMediaJob(msg, mimetype, kind) {
+  await acquireMediaSlot();
+  try {
+    const buffer = await downloadMediaMessage(msg, 'buffer', {}).catch(() => null);
+    let shrunk = null;
+    if (buffer && kind === 'image') {
+      shrunk = await shrinkImage(buffer, mimetype).catch(() => null);
+    }
+    return { buffer, shrunk };
+  } finally {
+    releaseMediaSlot();
+  }
+}
+
 // Receipt attachments: the /api/receipts endpoint has no file field, so the bot
 // uploads the bill file to Cloudinary (folder market-ledger/) itself and appends
 // the URL to the receipt description. Works for images and PDFs.
@@ -265,15 +301,16 @@ async function deleteMessage(jid, key) {
 async function handleActivate({ remoteJid, msg, username, password }) {
   // best-effort: bot group admin ho to ye message delete ho jayega, warna nahi
   await deleteMessage(remoteJid, msg.key);
+  const PW_REMINDER = '\n⚠️ Apna password wala message group se delete kar dein — ye sab ko nazar aata hai.';
   const check = createUserLedgerClient({ baseUrl: LEDGER_URL, username, password });
   try {
     await check.ensureToken();
   } catch (e) {
     console.log(`🔐 activate: credential check failed for "${username}" (status=${e.status || '?'})`);
-    if (e.status === 401) await sendText(remoteJid, '❌ Wrong user ID or password.', msg);
-    else if (e.status === 403) await sendText(remoteJid, '⛔ This account is blocked. Contact the admin.', msg);
-    else if (e.status === 429) await sendText(remoteJid, '⏳ Too many attempts — try again in a bit.', msg);
-    else await sendText(remoteJid, `❌ Could not activate: ${e.message || 'unknown error'}`, msg);
+    if (e.status === 401) await sendText(remoteJid, '❌ Wrong user ID or password.' + PW_REMINDER, msg);
+    else if (e.status === 403) await sendText(remoteJid, '⛔ This account is blocked. Contact the admin.' + PW_REMINDER, msg);
+    else if (e.status === 429) await sendText(remoteJid, '⏳ Too many attempts — try again in a bit.' + PW_REMINDER, msg);
+    else await sendText(remoteJid, `❌ Could not activate: ${e.message || 'unknown error'}` + PW_REMINDER, msg);
     return;
   }
   let subject = '';
@@ -288,15 +325,15 @@ async function handleActivate({ remoteJid, msg, username, password }) {
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) {
       if (r.status === 409) {
-        await sendText(remoteJid, '❌ This ID is already active in another group.\nOne ID works in only one group.', msg);
+        await sendText(remoteJid, '❌ This ID is already active in another group.\nOne ID works in only one group.' + PW_REMINDER, msg);
       } else {
-        await sendText(remoteJid, `❌ Could not activate: ${j.error || 'unknown error'}`, msg);
+        await sendText(remoteJid, `❌ Could not activate: ${j.error || 'unknown error'}` + PW_REMINDER, msg);
       }
       return;
     }
   } catch (e) {
     console.error('activate bind fail:', e.message);
-    await sendText(remoteJid, `❌ Could not activate: ${e.message}`, msg);
+    await sendText(remoteJid, `❌ Could not activate: ${e.message}` + PW_REMINDER, msg);
     return;
   }
   groupBindings.set(remoteJid, { client: userClientFor(username), username, name: subject });
@@ -328,6 +365,66 @@ function runBackgroundSave(senderKey, job) {
   next.finally(() => { if (saveChains.get(senderKey) === next) saveChains.delete(senderKey); });
   return next;
 }
+
+// ─── Unbound-group hint throttle: one hint per group per 6 hours ───
+const UNBOUND_HINT_MS = 6 * 60 * 60 * 1000;
+const unboundHintAt = new Map(); // groupJid -> last hint timestamp
+
+// Bare command words typed at the bill DESCRIPTION step mean "I'm lost",
+// not a description — they must never be saved as the entry's description.
+const FLOW_COMMAND_WORDS = new Set(['help', 'today', 'bill', 'undo', 'expense', 'newparty', 'parties', 'balance', 'history', 'menu', 'report']);
+// Command words for the typo hint (a single word within edit distance 2).
+const COMMAND_WORDS = ['bill', 'today', 'help', 'undo', 'cancel', 'balance', 'history', 'expense', 'parties', 'menu', 'newparty'];
+
+function levenshtein(a, b) {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+// After an expired session is swept, start the sender's next queued bill.
+// Top-level twin of the handler's advanceQueue: queued items carry their own
+// startFlow closure from the message that delivered them.
+async function startNextQueued(senderKey) {
+  if (convos.get(senderKey)) return; // a flow is active again — leave the queue
+  const q = mediaQueues.get(senderKey);
+  if (!q || !q.length) return;
+  const next = q.shift();
+  if (!q.length) mediaQueues.delete(senderKey);
+  if (next && typeof next.startFlow === 'function') {
+    await next.startFlow();
+  }
+}
+
+// ─── Expiry sweep: a timed-out flow must SAY so, not vanish silently ───
+setInterval(async () => {
+  try {
+    const now = Date.now();
+    for (const { key } of convos.sweepExpired(now)) {
+      const groupJid = key.split('|')[0];
+      console.log(`⏰ bill session expired: ${key}`);
+      if (groupBindings.get(groupJid)?.client) {
+        await sendText(groupJid, '⏰ Bill ka waqt khatam ho gaya — 10 minute tak koi jawab nahi mila. Bill ki photo dobara bhejein.').catch(() => {});
+      }
+      await startNextQueued(key).catch((e) => console.error('expiry queue advance fail:', e.message));
+    }
+    for (const { key } of tasks.sweepExpired(now)) {
+      const groupJid = key.split('|')[0];
+      console.log(`⏰ task expired: ${key}`);
+      if (groupBindings.get(groupJid)?.client) {
+        await sendText(groupJid, '⏰ Process ka waqt khatam ho gaya — dobara shuru karein.').catch(() => {});
+      }
+    }
+  } catch (e) {
+    console.error('expiry sweep fail:', e.message);
+  }
+}, 30 * 1000).unref();
 async function processBill(groupJid, msg, parsed, buffer, media, description, entryDate, client, knownParty, preBalance = null) {
   const kind = media?.kind || (buffer ? 'image' : 'text');
   let mimetype = media?.mimetype || 'image/jpeg';
@@ -378,7 +475,7 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
     let photoFailed = false; // receipt: bill photo Cloudinary upload failed (entry still saved)
     if (parsed.type === 'sale' || parsed.type === 'purchase' || parsed.type === 'payment') {
       const createFn = parsed.type === 'sale' ? L.createSale : parsed.type === 'purchase' ? L.createPurchase : L.createPayment;
-      const res = await createFn({
+      const args = {
         partyId: party.id,
         amount: parsed.amount,
         date,
@@ -387,8 +484,19 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
         filename,
         mimetype,
         method: parsed.method || 'cash',
-      });
-      entryId = res && res.id != null ? res.id : null;
+      };
+      try {
+        const res = await createFn(args);
+        entryId = res && res.id != null ? res.id : null;
+      } catch (e) {
+        // Portal-side photo upload failed → save the entry WITHOUT the photo
+        // (the fallback receipt photos already had). Other errors stay fatal.
+        if (!buffer || !/cloudinary|upload/i.test(e.message || '')) throw e;
+        photoFailed = true;
+        console.error(`${parsed.type} photo upload fail (saving without photo):`, e.message);
+        const res = await createFn({ ...args, photoBuffer: null });
+        entryId = res && res.id != null ? res.id : null;
+      }
     } else if (hasMedia && kind === 'image') {
       // Receipt photo goes THROUGH the portal (the sales rasta) — the portal's
       // Cloudinary upload works; the bot's own Cloudinary creds are stale and
@@ -482,13 +590,23 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
   } catch (e) {
     console.error('entry failed:', e.message);
     const errText = e.message || '';
-    if (/rate limit|too many requests|429/i.test(errText)) {
-      // Cloudinary throttling: sale needs its bill photo, so nothing was saved.
+    if (entryId != null) {
+      // The entry IS saved — only the bill card failed to send. Say so
+      // honestly instead of "could not save" (which invites a duplicate).
+      try {
+        await sendText(groupJid, '✅ Entry save ho gayi hai — card bhejne me masla aaya, portal par entry check kar lein.', msg);
+      } catch {}
+      return { ok: true, id: entryId, type: parsed.type, partyName: party.name, amount: parsed.amount };
+    }
+    if (/cloudinary/i.test(errText) && /rate limit|too many requests|429/i.test(errText)) {
+      // Cloudinary throttling: the bill photo could not upload, nothing saved.
       await sendText(
         groupJid,
         '⏳ *Cloudinary rate limit hit* — photo not uploaded, *entry NOT saved*.\nSend the bill again in 5-10 min.',
         msg
       );
+    } else if (/rate limit|too many requests|429/i.test(errText)) {
+      await sendText(groupJid, '⏳ Server busy hai (rate limit) — entry save NAHI hui, thori dair baad dobara koshish karein.', msg);
     } else {
       await sendText(groupJid, `❌ Could not save entry: ${errText}`, msg);
     }
@@ -596,7 +714,12 @@ async function startBot() {
         const img = inner.imageMessage;
         const doc = inner.documentMessage;
         const text = String(inner.conversation || inner.extendedTextMessage?.text || '').trim();
-        const senderKey = msg.key.participant || msg.pushName || remoteJid;
+        const isVideoMsg = !!inner.videoMessage;
+        const isOtherMedia = isVideoMsg || !!inner.audioMessage || !!inner.stickerMessage || !!inner.locationMessage || !!inner.liveLocationMessage || !!inner.contactMessage || !!inner.contactsArrayMessage;
+        // Sessions are per (group, person): the same person in two bound
+        // groups gets independent flows/queues/undo in each group. This key
+        // is never a send target — all sends use remoteJid.
+        const senderKey = `${remoteJid}|${msg.key.participant || remoteJid}`;
 
         // ── DMs: promo reply only, no functionality ──
         if (isDM) {
@@ -616,10 +739,20 @@ async function startBot() {
             } else {
               await handleActivate({ remoteJid, msg, username: act.username, password: act.password });
             }
+          } else if (Date.now() - (unboundHintAt.get(remoteJid) || 0) > UNBOUND_HINT_MS) {
+            // Not activated yet: one hint per 6h per group, so the bot does
+            // not look dead to a new customer — but never spams the group.
+            unboundHintAt.set(remoteJid, Date.now());
+            await sendText(remoteJid, '👋 Is group me Ledger360 bot abhi activate nahi hai.\nActivate karne ke liye group me likhein: *activate <user-id> <password>*', msg);
           }
-          continue; // unbound group: silent
+          continue; // unbound group: nothing else works
         }
         const client = binding.client; // this group's customer ledger
+
+        // Any message from this sender is activity — reset the 10-minute
+        // inactivity clock on their bill session / task before handling.
+        if (convos.get(senderKey)) convos.touch(senderKey);
+        if (tasks.get(senderKey)) tasks.touch(senderKey);
 
         // bill media = photo, or a PDF document
         const docMime = String(doc?.mimetype || '').toLowerCase();
@@ -634,7 +767,20 @@ async function startBot() {
           : isPdf
             ? { kind: 'pdf', caption: String(doc.caption || '').trim(), mimetype: 'application/pdf', filename: doc.fileName || `bill_${Date.now()}.pdf` }
             : null;
-        if (!media && !text) continue; // nothing we handle here
+        if (!media && !text) {
+          // Not a bill and not text (video / voice / sticker / location /
+          // contact): mid-flow the user owes a text answer; with no flow
+          // running, only a video earns a pointer. The rest stays silent.
+          if (isOtherMedia) {
+            handledIds.add(msg.key.id);
+            if (convos.get(senderKey) || tasks.get(senderKey)) {
+              await sendText(remoteJid, 'Is step par *text* me jawab dein — ya flow rokne ke liye *cancel* likhein.', msg);
+            } else if (isVideoMsg) {
+              await sendText(remoteJid, '🎥 Video se bill save nahi hota — bill ki *photo* ya *PDF* bhejein.', msg);
+            }
+          }
+          continue;
+        }
 
         handledIds.add(msg.key.id);
         if (handledIds.size > 1000) {
@@ -851,7 +997,7 @@ async function startBot() {
               tasks.setStep(senderKey, TASK_STEPS.OPENING, { phone });
               await sendText(
                 remoteJid,
-                `Step 4/5 — *Opening balance* bhejein.\n\nCustomer ka purana lena: 5000\nPurchaser ko dena ho: -5000\n\nType *skip* for 0.`,
+                `Step 4/5 — Send the *opening balance*.\n\nCustomer owes you: 5000\nYou owe the Purchaser: -5000\n\nType *skip* for 0.`,
                 msg
               );
               return;
@@ -859,7 +1005,7 @@ async function startBot() {
             if (task.step === TASK_STEPS.OPENING) {
               const opening = parseOpeningBalance(textValue);
               if (opening === null) {
-                await sendText(remoteJid, '❌ Valid opening balance bhejein.\nExample: 5000, -5000, or *skip*.', msg);
+                await sendText(remoteJid, '❌ Send a valid opening balance.\nExample: 5000, -5000, or *skip*.', msg);
                 return;
               }
               const parties = await needParties();
@@ -877,6 +1023,7 @@ async function startBot() {
             if (task.step === TASK_STEPS.CONFIRM) {
               if (['yes', 'haan', 'ha', 'y', '1'].includes(low)) {
                 try {
+                  await sendText(remoteJid, '⏳ Saving…', msg);
                   const res = await client.createParty({
                     name: task.partyName,
                     phone: task.phone || '',
@@ -932,13 +1079,13 @@ async function startBot() {
                 return;
               }
               tasks.setStep(senderKey, TASK_STEPS.DATE, { method });
-              await sendText(remoteJid, `✅ Method: ${methodLabel(method)}\n\nStep 4/6 — Bill *date* bhejein.\nType *today*, or 28-09-2026.`, msg);
+              await sendText(remoteJid, `✅ Method: ${methodLabel(method)}\n\nStep 4/6 — Send the bill *date*.\nType *today*, or 28-09-2026.`, msg);
               return;
             }
             if (task.step === TASK_STEPS.DATE) {
               const expenseDate = parseDateInput(textValue, todayPK());
               if (!expenseDate) {
-                await sendText(remoteJid, '❌ Valid date bhejein: *today*, 28-09-2026, or 2026-09-28.', msg);
+                await sendText(remoteJid, '❌ Send a valid date: *today*, 28-09-2026, or 2026-09-28.', msg);
                 return;
               }
               tasks.setStep(senderKey, TASK_STEPS.DESCRIPTION, { expenseDate });
@@ -959,6 +1106,7 @@ async function startBot() {
             if (task.step === TASK_STEPS.CONFIRM) {
               if (['yes', 'haan', 'ha', 'y', '1'].includes(low)) {
                 try {
+                  await sendText(remoteJid, '⏳ Saving…', msg);
                   const res = await client.createExpense({
                     amount: task.amount,
                     date: task.expenseDate,
@@ -1005,6 +1153,7 @@ async function startBot() {
             // shortcut: "<party> sales|receipt <amount>" caption still works instantly
             console.log(`📩 bill ${item.kind} in "${binding.name}": caption="${item.caption.slice(0, 80)}"`);
             const parties = await needParties();
+            if (!parties) return; // connection error already sent — stop, don't fall into a save that fails a second time
             const today = todayPK();
             const party = parties ? client.findParty(parties, parsed.partyName) : null;
             const dupRes = party ? await findDuplicate(party.id, parsed.type, parsed.amount, today) : { entry: null, balance: null };
@@ -1062,16 +1211,24 @@ async function startBot() {
 
         if (media) {
           // ── a bill photo/PDF arrived ──
-          // Download + shrink start NOW but run in the BACKGROUND — the flow
-          // (party list) starts instantly, and the photo is only awaited at
-          // save time. A failed download no longer kills the entry: it is
-          // saved without the photo and the card says so.
-          const bufferPromise = downloadMediaMessage(msg, 'buffer', {});
-          bufferPromise.catch(() => {}); // rejection is handled at save time
-          const item = { bufferPromise, mimetype: media.mimetype, filename: media.filename, kind: media.kind, caption: media.caption };
-          if (media.kind === 'image') {
-            item.shrunkPromise = bufferPromise.then((b) => shrinkImage(b, media.mimetype)).catch(() => null);
-          }
+          // Download + shrink run as a BACKGROUND media job, gated by the
+          // media semaphore (max 2 at once). The flow (party list) starts
+          // instantly, and the photo is only awaited at save time. A failed
+          // download no longer kills the entry: it is saved without the
+          // photo and the card says so.
+          const job = runMediaJob(msg, media.mimetype, media.kind);
+          const item = {
+            bufferPromise: job.then((m) => m.buffer),
+            shrunkPromise: job.then((m) => m.shrunk),
+            mimetype: media.mimetype,
+            filename: media.filename,
+            kind: media.kind,
+            caption: media.caption,
+          };
+          // Lets the expiry sweep start this bill later if it sat in the
+          // queue behind a session that timed out (startBillFlow is hoisted
+          // within this handler scope).
+          item.startFlow = () => startBillFlow(item);
           if (convos.get(senderKey) || saveChains.has(senderKey)) {
             // busy with another bill → queue this one, it starts automatically later
             const q = getBillQueue();
@@ -1093,6 +1250,12 @@ async function startBot() {
             continue;
           }
           await startBillFlow(item);
+          continue;
+        }
+
+        // ── 'activate' typed in a group that is already bound ──
+        if (/^activate\b/i.test(text)) {
+          await sendText(remoteJid, '✅ Ye group pehle se activate hai. Binding badalna ho to pehle admin se is group ko unbind karwayen.', msg);
           continue;
         }
 
@@ -1118,6 +1281,12 @@ async function startBot() {
 
         // ── "undo": delete the last entry this bot created for this sender (30 min window) ──
         if (botCommand === 'undo' && !convos.get(senderKey) && !tasks.get(senderKey)) {
+          if (saveChains.has(senderKey)) {
+            // A background save is still in flight: undo right now would
+            // delete the PREVIOUS entry, not the one being saved.
+            await sendText(remoteJid, '⏳ Aik entry abhi save ho rahi hai — us ka card aa jaye to phir *undo* karein.', msg);
+            continue;
+          }
           const last = lastEntries.get(senderKey);
           if (!last || Date.now() - last.at > UNDO_TTL_MS) {
             await sendText(remoteJid, '❓ No recent entry found to undo.\n(Only entries made by the bot in the last 30 min can be undone.)', msg);
@@ -1175,7 +1344,16 @@ async function startBot() {
         // ── a text message arrived: part of an active step-by-step session? ──
         const sess = convos.get(senderKey);
         const task = tasks.get(senderKey);
-        if (!sess && !task) continue; // no session → stay silent (ordinary text is ignored)
+        if (!sess && !task) {
+          // No session: ordinary text stays silent — EXCEPT a single short
+          // word that looks like a mistyped command, which earns a pointer
+          // to help instead of dead air.
+          const w = text.trim().toLowerCase();
+          if (w && !/\s/.test(w) && w.length <= 12 && !COMMAND_WORDS.includes(w) && COMMAND_WORDS.some((c) => levenshtein(w, c) <= 2)) {
+            await sendText(remoteJid, '🤔 Samajh nahi aaya. *help* likhein — tamaam commands ki list mil jayegi.', msg);
+          }
+          continue;
+        }
 
         const low = text.toLowerCase().trim();
         if (low === 'cancel all' || low === 'cancel queue') {
@@ -1213,6 +1391,7 @@ async function startBot() {
           if (shortcut.ok) {
             const s = convos.get(senderKey);
             const parties = sess.parties || (await needParties());
+            if (!parties) { convos.clear(senderKey); continue; } // error already sent — stop, no second failure from the save
             const today = todayPK();
             const party = parties ? client.findParty(parties, shortcut.partyName) : null;
             const dupRes = party ? await findDuplicate(party.id, shortcut.type, shortcut.amount, today) : { entry: null, balance: null };
@@ -1331,6 +1510,12 @@ async function startBot() {
         }
 
         if (sess.step === STEPS.DESCRIPTION) {
+          // A bare command word here means a lost user, not a description —
+          // never save "help" / "today" / … as the entry's description.
+          if (FLOW_COMMAND_WORDS.has(low)) {
+            await sendText(remoteJid, 'Aap abhi bill flow me hain — pehle ye entry mukammal karein, ya *cancel* likh kar flow band karein.', msg);
+            continue;
+          }
           const skipWords = new Set(['skip', '-', 'nahi', 'nahin', 'no', 'n']);
           const description = skipWords.has(text.trim().toLowerCase()) ? '' : text.trim().slice(0, 500);
           convos.setStep(senderKey, STEPS.DATE, { description });

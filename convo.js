@@ -70,6 +70,18 @@ export function createConvoStore(ttlMs = CONVO_TTL_MS) {
       map.delete(key);
     },
 
+    /** Remove every expired session; returns [{ key, value }] so the caller can notify + clean up. */
+    sweepExpired(now = Date.now()) {
+      const out = [];
+      for (const [key, s] of map) {
+        if (now - s.at > ttlMs) {
+          map.delete(key);
+          out.push({ key, value: s });
+        }
+      }
+      return out;
+    },
+
     size() {
       return map.size;
     },

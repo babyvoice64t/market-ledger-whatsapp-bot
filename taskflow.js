@@ -55,6 +55,11 @@ export function createTaskStore(ttlMs = TASK_TTL_MS) {
       return s;
     },
     get,
+    touch(key) {
+      const s = get(key);
+      if (s) s.at = Date.now();
+      return s;
+    },
     setStep(key, step, patch = {}) {
       const s = get(key);
       if (!s) return null;
@@ -65,6 +70,16 @@ export function createTaskStore(ttlMs = TASK_TTL_MS) {
     },
     clear(key) {
       map.delete(key);
+    },
+    sweepExpired(now = Date.now()) {
+      const out = [];
+      for (const [key, s] of map) {
+        if (now - s.at > ttlMs) {
+          map.delete(key);
+          out.push({ key, value: s });
+        }
+      }
+      return out;
     },
     size() {
       return map.size;
