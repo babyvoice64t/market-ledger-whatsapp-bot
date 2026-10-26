@@ -158,8 +158,24 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, login
     return j;
   }
 
-  async function createReceipt({ partyId, amount, date, description, method = 'cash' }) {
+  async function createReceipt({ partyId, amount, date, description, method = 'cash', photoBuffer, filename, mimetype }) {
     const t = await ensureToken();
+    // Photo ke saath multipart (portal khud Cloudinary upload karta hai —
+    // sales wala hi proven rasta), baghair photo JSON.
+    if (photoBuffer) {
+      const form = new FormData();
+      form.append('password', t);
+      form.append('party_id', String(partyId));
+      form.append('amount', String(amount));
+      form.append('date', date);
+      form.append('method', method || 'cash');
+      if (description) form.append('description', description);
+      form.append('photo', new Blob([photoBuffer], { type: mimetype || 'image/jpeg' }), filename || 'receipt.jpg');
+      const r = await fetchImpl(`${base}/api/receipts`, { method: 'POST', body: form });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || 'receipt request failed');
+      return j;
+    }
     const r = await fetchImpl(`${base}/api/receipts`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

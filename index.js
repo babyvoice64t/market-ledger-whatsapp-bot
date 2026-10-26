@@ -151,7 +151,7 @@ app.get('/qr', async (req, res) => {
   res.json({ qr: qrDataUrl, connected: isConnected, groups: groupBindings.size });
 });
 
-app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, groups: groupBindings.size, version: '2.10.1' }));
+app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, groups: groupBindings.size, version: '2.10.2' }));
 
 // ─── Helpers ───
 function msgKeyId(key) { return `${key.remoteJid}:${key.id}`; }
@@ -317,21 +317,37 @@ const UNDO_TTL_MS = 30 * 60 * 1000;
 // senderKey -> bills waiting their turn (one active bill per sender at a time)
 const mediaQueues = new Map();
 const MAX_QUEUE = 10;
+// senderKey -> promise chain serializing BACKGROUND saves: replies stay
+// instant, saves finish behind the scenes, one at a time per sender so
+// balances and duplicate state stay consistent.
+const saveChains = new Map();
+function runBackgroundSave(senderKey, job) {
+  const prev = saveChains.get(senderKey) || Promise.resolve();
+  const next = prev.then(() => job()).catch((e) => console.error('background save error:', e.message));
+  saveChains.set(senderKey, next);
+  next.finally(() => { if (saveChains.get(senderKey) === next) saveChains.delete(senderKey); });
+  return next;
+}
 async function processBill(groupJid, msg, parsed, buffer, media, description, entryDate, client, knownParty, preBalance = null) {
-  const hasMedia = !!buffer;
-  const kind = media?.kind || (hasMedia ? 'image' : 'text');
+  const kind = media?.kind || (buffer ? 'image' : 'text');
   let mimetype = media?.mimetype || 'image/jpeg';
   let filename = media?.filename || `bill_${Date.now()}.jpg`;
-  // The photo shrink runs in the background from download time (it must not
-  // delay the first reply on the tiny CPU) — resolve it now, at save time.
+  // Photo download + shrink have been running in the background since the
+  // photo arrived — resolve them now, at save time. If the download failed,
+  // the entry is still saved (without the photo) and the card says so.
+  if (media?.bufferPromise) {
+    buffer = await media.bufferPromise.catch(() => null);
+  }
   if (media?.shrunkPromise) {
     const shrunk = await media.shrunkPromise.catch(() => null);
-    if (shrunk && shrunk !== buffer) {
+    if (shrunk) {
       buffer = shrunk;
       mimetype = 'image/jpeg';
       filename = String(filename).replace(/\.\w+$/, '.jpg');
     }
   }
+  const hasMedia = !!buffer;
+  const downloadFailed = !hasMedia && (kind === 'image' || kind === 'pdf');
   const date = entryDate || todayPK();
   const desc = String(description || '').trim() || 'Added via WhatsApp';
   const L = client; // this group's bound customer ledger
@@ -373,7 +389,38 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
         method: parsed.method || 'cash',
       });
       entryId = res && res.id != null ? res.id : null;
+    } else if (hasMedia && kind === 'image') {
+      // Receipt photo goes THROUGH the portal (the sales rasta) — the portal's
+      // Cloudinary upload works; the bot's own Cloudinary creds are stale and
+      // made every receipt photo fail. Portal upload error → save without it.
+      try {
+        const res = await L.createReceipt({
+          partyId: party.id,
+          amount: parsed.amount,
+          date,
+          description: desc,
+          method: parsed.method || 'cash',
+          photoBuffer: buffer,
+          filename,
+          mimetype,
+        });
+        entryId = res && res.id != null ? res.id : null;
+      } catch (e) {
+        if (!/cloudinary|upload/i.test(e.message || '')) throw e;
+        photoFailed = true;
+        console.error('receipt photo upload fail (saving without photo):', e.message);
+        const res = await L.createReceipt({
+          partyId: party.id,
+          amount: parsed.amount,
+          date,
+          description: desc,
+          method: parsed.method || 'cash',
+        });
+        entryId = res && res.id != null ? res.id : null;
+      }
     } else {
+      // No photo, or a PDF (portal photo field is image-only — PDFs keep the
+      // direct-upload + description-URL path).
       let photoUrl = '';
       if (hasMedia) {
         try {
@@ -413,6 +460,9 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
     }
     if (photoFailed) {
       lines.push('⚠️ Bill photo upload failed (Cloudinary) — entry was still saved.');
+    }
+    if (downloadFailed) {
+      lines.push('⚠️ Bill photo download failed — entry saved without the photo.');
     }
     if (balance !== null) lines.push(`📊 Balance: ${formatRs(balance)}`);
     const caption = lines.join('\n');
@@ -634,6 +684,9 @@ async function startBot() {
         }
 
         // ── helper: create the entry from a finished session and track it for undo ──
+        // The user gets an instant "Saving…" reply; the heavy save (photo
+        // upload + portal + card) finishes in the BACKGROUND and the bill
+        // card follows when it's done.
         async function finalizeEntry(s) {
           convos.clear(senderKey);
           const parsed = { ok: true, partyName: s.partyName, type: s.entryType, amount: s.amount, method: s.method || 'cash' };
@@ -641,9 +694,12 @@ async function startBot() {
             `👉 creating ${s.entryType}: ${s.partyName} ${s.amount} date=${s.entryDate}` +
               (s.description ? ` desc=${s.description.slice(0, 40)}` : '')
           );
-          const res = await processBill(remoteJid, msg, parsed, s.media ? s.media.buffer : null, s.media, s.description, s.entryDate, client, { id: s.partyId, name: s.partyName }, typeof s.preBalance === 'number' ? s.preBalance : null);
-          trackLastEntry(senderKey, res);
-          await advanceQueue(); // start the next queued bill, if any
+          await sendText(remoteJid, '⏳ Saving your entry…', msg);
+          runBackgroundSave(senderKey, async () => {
+            const res = await processBill(remoteJid, msg, parsed, null, s.media, s.description, s.entryDate, client, { id: s.partyId, name: s.partyName }, typeof s.preBalance === 'number' ? s.preBalance : null);
+            trackLastEntry(senderKey, res);
+            await advanceQueue(); // start the next queued bill, if any
+          });
         }
 
         function partyListPrompt(parties) {
@@ -954,7 +1010,7 @@ async function startBot() {
             const dupRes = party ? await findDuplicate(party.id, parsed.type, parsed.amount, today) : { entry: null, balance: null };
             if (dupRes.entry) {
               // duplicate suspected → ask instead of creating instantly
-              convos.start(senderKey, { buffer: item.buffer, mimetype: item.mimetype, filename: item.filename, kind: item.kind, shrunkPromise: item.shrunkPromise });
+              convos.start(senderKey, { bufferPromise: item.bufferPromise, mimetype: item.mimetype, filename: item.filename, kind: item.kind, shrunkPromise: item.shrunkPromise });
               convos.setStep(senderKey, STEPS.CONFIRM, {
                 partyId: party.id, partyName: party.name, entryType: parsed.type,
                 amount: parsed.amount, description: '', entryDate: today, dup: true, preBalance: dupRes.balance,
@@ -962,8 +1018,12 @@ async function startBot() {
               console.log(`⚠️ duplicate suspected (caption shortcut): ${party.name} ${parsed.amount}`);
               await sendText(remoteJid, dupPrompt(party.name, parsed.type, parsed.amount, today), msg);
             } else {
-              const res = await processBill(remoteJid, msg, parsed, item.buffer, item, undefined, undefined, client, undefined, dupRes.balance);
-              trackLastEntry(senderKey, res);
+              await sendText(remoteJid, '⏳ Saving your entry…', msg);
+              runBackgroundSave(senderKey, async () => {
+                const res = await processBill(remoteJid, msg, parsed, null, item, undefined, undefined, client, undefined, dupRes.balance);
+                trackLastEntry(senderKey, res);
+                await advanceQueue();
+              });
             }
             return;
           }
@@ -974,7 +1034,7 @@ async function startBot() {
             await sendText(remoteJid, `⚠️ No parties in the portal yet. Add a party in the portal first: ${LEDGER_URL}/`, msg);
             return;
           }
-          convos.start(senderKey, { buffer: item.buffer, mimetype: item.mimetype, filename: item.filename, kind: item.kind, shrunkPromise: item.shrunkPromise });
+          convos.start(senderKey, { bufferPromise: item.bufferPromise, mimetype: item.mimetype, filename: item.filename, kind: item.kind, shrunkPromise: item.shrunkPromise });
           const _csA = convos.get(senderKey); if (_csA) _csA.parties = parties;
           const label = item.kind === 'pdf' ? 'PDF' : 'Photo';
           console.log(`📩 bill ${item.kind} in "${binding.name}" — asking party`);
@@ -1002,23 +1062,17 @@ async function startBot() {
 
         if (media) {
           // ── a bill photo/PDF arrived ──
-          let buffer;
-          try {
-            buffer = await downloadMediaMessage(msg, 'buffer', {});
-          } catch (e) {
-            console.error('download fail:', e.message);
-            await sendText(remoteJid, '❌ File download failed. Send it again.', msg);
-            continue;
-          }
-          const item = { buffer, mimetype: media.mimetype, filename: media.filename, kind: media.kind, caption: media.caption };
+          // Download + shrink start NOW but run in the BACKGROUND — the flow
+          // (party list) starts instantly, and the photo is only awaited at
+          // save time. A failed download no longer kills the entry: it is
+          // saved without the photo and the card says so.
+          const bufferPromise = downloadMediaMessage(msg, 'buffer', {});
+          bufferPromise.catch(() => {}); // rejection is handled at save time
+          const item = { bufferPromise, mimetype: media.mimetype, filename: media.filename, kind: media.kind, caption: media.caption };
           if (media.kind === 'image') {
-            // Shrink in the BACKGROUND: on the tiny free CPU this is the single
-            // slowest step, and the first reply (party list) must not wait for
-            // it. processBill awaits item.shrunkPromise at save time — by then
-            // the user has usually answered, so the cost is already paid.
-            item.shrunkPromise = shrinkImage(item.buffer, item.mimetype);
+            item.shrunkPromise = bufferPromise.then((b) => shrinkImage(b, media.mimetype)).catch(() => null);
           }
-          if (convos.get(senderKey)) {
+          if (convos.get(senderKey) || saveChains.has(senderKey)) {
             // busy with another bill → queue this one, it starts automatically later
             const q = getBillQueue();
             if (q.length >= MAX_QUEUE) {
@@ -1172,8 +1226,12 @@ async function startBot() {
             } else {
               convos.clear(senderKey);
               console.log(`📩 caption shortcut in "${binding.name}": "${text.slice(0, 80)}"`);
-              const res = await processBill(remoteJid, msg, shortcut, s.media ? s.media.buffer : null, s.media, undefined, undefined, client, undefined, dupRes.balance);
-              trackLastEntry(senderKey, res);
+              await sendText(remoteJid, '⏳ Saving your entry…', msg);
+              runBackgroundSave(senderKey, async () => {
+                const res = await processBill(remoteJid, msg, shortcut, null, s.media, undefined, undefined, client, undefined, dupRes.balance);
+                trackLastEntry(senderKey, res);
+                await advanceQueue();
+              });
             }
             continue;
           }
