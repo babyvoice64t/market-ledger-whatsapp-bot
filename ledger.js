@@ -205,17 +205,23 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, login
   // /api/entries/recent only covers sales + receipts, so purchase/payment
   // entries are merged in from /api/ledger (duplicate match is on date+amount).
   // -> [{type:'sale'|'receipt'|'purchase'|'payment', id, amount, description, date, created_at}]
-  async function getRecentEntries(partyId, minutes = 120) {
-    const r = await authedGet(
-      `/api/entries/recent?party_id=${encodeURIComponent(partyId)}&minutes=${encodeURIComponent(minutes)}`
-    );
+  // Also returns the party's current portal balance (the /api/ledger response
+  // already carries totals) so a save can reuse it instead of fetching the
+  // ledger a second time just for the balance. The two GETs run in parallel.
+  async function getRecentEntriesAndBalance(partyId, minutes = 120) {
+    const [r, lr] = await Promise.all([
+      authedGet(
+        `/api/entries/recent?party_id=${encodeURIComponent(partyId)}&minutes=${encodeURIComponent(minutes)}`
+      ),
+      authedGet(`/api/ledger?party_id=${encodeURIComponent(partyId)}`).catch(() => null),
+    ]);
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || 'recent entries request failed');
     const entries = j.entries || [];
+    let balance = null;
     try {
-      const lr = await authedGet(`/api/ledger?party_id=${encodeURIComponent(partyId)}`);
-      const lj = await lr.json().catch(() => ({}));
-      if (lr.ok && Array.isArray(lj.entries)) {
+      const lj = lr ? await lr.json().catch(() => ({})) : {};
+      if (lr && lr.ok && Array.isArray(lj.entries)) {
         const have = new Set(entries.map((e) => `${e.type}:${e.id}`));
         for (const e of lj.entries) {
           if (e.type !== 'purchase' && e.type !== 'payment') continue;
@@ -228,7 +234,13 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, login
           });
         }
       }
+      if (lr && lr.ok && lj.totals && typeof lj.totals.balance === 'number') balance = lj.totals.balance;
     } catch { /* duplicate detection just falls back to sales + receipts */ }
+    return { entries, balance };
+  }
+
+  async function getRecentEntries(partyId, minutes = 120) {
+    const { entries } = await getRecentEntriesAndBalance(partyId, minutes);
     return entries;
   }
 
@@ -273,6 +285,7 @@ export function createLedgerClient({ baseUrl, password, fetchImpl = fetch, login
     createExpense,
     getToday,
     getRecentEntries,
+    getRecentEntriesAndBalance,
     deleteEntry,
   };
 }

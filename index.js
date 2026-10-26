@@ -151,7 +151,7 @@ app.get('/qr', async (req, res) => {
   res.json({ qr: qrDataUrl, connected: isConnected, groups: groupBindings.size });
 });
 
-app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, groups: groupBindings.size, version: '2.10.0' }));
+app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, groups: groupBindings.size, version: '2.10.1' }));
 
 // ─── Helpers ───
 function msgKeyId(key) { return `${key.remoteJid}:${key.id}`; }
@@ -317,11 +317,21 @@ const UNDO_TTL_MS = 30 * 60 * 1000;
 // senderKey -> bills waiting their turn (one active bill per sender at a time)
 const mediaQueues = new Map();
 const MAX_QUEUE = 10;
-async function processBill(groupJid, msg, parsed, buffer, media, description, entryDate, client, knownParty) {
+async function processBill(groupJid, msg, parsed, buffer, media, description, entryDate, client, knownParty, preBalance = null) {
   const hasMedia = !!buffer;
   const kind = media?.kind || (hasMedia ? 'image' : 'text');
-  const mimetype = media?.mimetype || 'image/jpeg';
-  const filename = media?.filename || `bill_${Date.now()}.jpg`;
+  let mimetype = media?.mimetype || 'image/jpeg';
+  let filename = media?.filename || `bill_${Date.now()}.jpg`;
+  // The photo shrink runs in the background from download time (it must not
+  // delay the first reply on the tiny CPU) — resolve it now, at save time.
+  if (media?.shrunkPromise) {
+    const shrunk = await media.shrunkPromise.catch(() => null);
+    if (shrunk && shrunk !== buffer) {
+      buffer = shrunk;
+      mimetype = 'image/jpeg';
+      filename = String(filename).replace(/\.\w+$/, '.jpg');
+    }
+  }
   const date = entryDate || todayPK();
   const desc = String(description || '').trim() || 'Added via WhatsApp';
   const L = client; // this group's bound customer ledger
@@ -383,7 +393,17 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
       entryId = res && res.id != null ? res.id : null;
     }
 
-    const balance = await L.getBalance(party.id).catch(() => null);
+    // Balance: reuse the pre-save balance from the duplicate check (same
+    // /api/ledger data) + this entry's delta — portal formula is
+    // opening + sales - receipts - purchases + payments. Falls back to a
+    // fresh fetch when the dup check didn't run or failed.
+    let balance = null;
+    if (typeof preBalance === 'number' && Number.isFinite(preBalance)) {
+      const delta = parsed.type === 'sale' || parsed.type === 'payment' ? Number(parsed.amount) : -Number(parsed.amount);
+      balance = Math.round((preBalance + delta) * 100) / 100;
+    } else {
+      balance = await L.getBalance(party.id).catch(() => null);
+    }
     const title = parsed.type === 'sale' ? '✅ *Sale Recorded*' : parsed.type === 'purchase' ? '✅ *Purchase Recorded*' : parsed.type === 'payment' ? '✅ *Payment Recorded*' : '✅ *Receipt Recorded*';
     const lines = [title, `🏪 Party: ${party.name}`, `💰 Amount: ${formatRs(parsed.amount)}`];
     if (desc !== 'Added via WhatsApp') lines.push(`📝 ${desc}`);
@@ -584,20 +604,23 @@ async function startBot() {
         }
 
         // ── helper: duplicate detection (same party + type + amount + date, last 3h) ──
+        // Returns { entry, balance }: entry = suspected duplicate (or null);
+        // balance = the party's portal balance BEFORE this entry, from the
+        // same /api/ledger fetch — processBill reuses it (no second fetch).
         async function findDuplicate(partyId, entryType, amount, entryDate) {
           try {
-            const recent = await client.getRecentEntries(partyId, 180);
-            return (
-              recent.find(
+            const { entries, balance } = await client.getRecentEntriesAndBalance(partyId, 180);
+            const entry =
+              entries.find(
                 (e) =>
                   e.type === entryType &&
                   Math.abs(Number(e.amount) - amount) < 0.005 &&
                   String(e.date || '') === entryDate
-              ) || null
-            );
+              ) || null;
+            return { entry, balance };
           } catch (e) {
             console.error('dup check fail:', e.message);
-            return null; // never block entry creation on a failed check
+            return { entry: null, balance: null }; // never block entry creation on a failed check
           }
         }
 
@@ -618,7 +641,7 @@ async function startBot() {
             `👉 creating ${s.entryType}: ${s.partyName} ${s.amount} date=${s.entryDate}` +
               (s.description ? ` desc=${s.description.slice(0, 40)}` : '')
           );
-          const res = await processBill(remoteJid, msg, parsed, s.media ? s.media.buffer : null, s.media, s.description, s.entryDate, client, { id: s.partyId, name: s.partyName });
+          const res = await processBill(remoteJid, msg, parsed, s.media ? s.media.buffer : null, s.media, s.description, s.entryDate, client, { id: s.partyId, name: s.partyName }, typeof s.preBalance === 'number' ? s.preBalance : null);
           trackLastEntry(senderKey, res);
           await advanceQueue(); // start the next queued bill, if any
         }
@@ -928,18 +951,18 @@ async function startBot() {
             const parties = await needParties();
             const today = todayPK();
             const party = parties ? client.findParty(parties, parsed.partyName) : null;
-            const dup = party ? await findDuplicate(party.id, parsed.type, parsed.amount, today) : null;
-            if (dup) {
+            const dupRes = party ? await findDuplicate(party.id, parsed.type, parsed.amount, today) : { entry: null, balance: null };
+            if (dupRes.entry) {
               // duplicate suspected → ask instead of creating instantly
-              convos.start(senderKey, { buffer: item.buffer, mimetype: item.mimetype, filename: item.filename, kind: item.kind });
+              convos.start(senderKey, { buffer: item.buffer, mimetype: item.mimetype, filename: item.filename, kind: item.kind, shrunkPromise: item.shrunkPromise });
               convos.setStep(senderKey, STEPS.CONFIRM, {
                 partyId: party.id, partyName: party.name, entryType: parsed.type,
-                amount: parsed.amount, description: '', entryDate: today, dup: true,
+                amount: parsed.amount, description: '', entryDate: today, dup: true, preBalance: dupRes.balance,
               });
               console.log(`⚠️ duplicate suspected (caption shortcut): ${party.name} ${parsed.amount}`);
               await sendText(remoteJid, dupPrompt(party.name, parsed.type, parsed.amount, today), msg);
             } else {
-              const res = await processBill(remoteJid, msg, parsed, item.buffer, item, undefined, undefined, client);
+              const res = await processBill(remoteJid, msg, parsed, item.buffer, item, undefined, undefined, client, undefined, dupRes.balance);
               trackLastEntry(senderKey, res);
             }
             return;
@@ -951,7 +974,7 @@ async function startBot() {
             await sendText(remoteJid, `⚠️ No parties in the portal yet. Add a party in the portal first: ${LEDGER_URL}/`, msg);
             return;
           }
-          convos.start(senderKey, { buffer: item.buffer, mimetype: item.mimetype, filename: item.filename, kind: item.kind });
+          convos.start(senderKey, { buffer: item.buffer, mimetype: item.mimetype, filename: item.filename, kind: item.kind, shrunkPromise: item.shrunkPromise });
           const _csA = convos.get(senderKey); if (_csA) _csA.parties = parties;
           const label = item.kind === 'pdf' ? 'PDF' : 'Photo';
           console.log(`📩 bill ${item.kind} in "${binding.name}" — asking party`);
@@ -989,8 +1012,11 @@ async function startBot() {
           }
           const item = { buffer, mimetype: media.mimetype, filename: media.filename, kind: media.kind, caption: media.caption };
           if (media.kind === 'image') {
-            item.buffer = await shrinkImage(item.buffer, item.mimetype);
-            if (item.buffer !== buffer) { item.mimetype = 'image/jpeg'; item.filename = String(item.filename).replace(/\.\w+$/, '.jpg'); }
+            // Shrink in the BACKGROUND: on the tiny free CPU this is the single
+            // slowest step, and the first reply (party list) must not wait for
+            // it. processBill awaits item.shrunkPromise at save time — by then
+            // the user has usually answered, so the cost is already paid.
+            item.shrunkPromise = shrinkImage(item.buffer, item.mimetype);
           }
           if (convos.get(senderKey)) {
             // busy with another bill → queue this one, it starts automatically later
@@ -1135,18 +1161,18 @@ async function startBot() {
             const parties = sess.parties || (await needParties());
             const today = todayPK();
             const party = parties ? client.findParty(parties, shortcut.partyName) : null;
-            const dup = party ? await findDuplicate(party.id, shortcut.type, shortcut.amount, today) : null;
-            if (dup) {
+            const dupRes = party ? await findDuplicate(party.id, shortcut.type, shortcut.amount, today) : { entry: null, balance: null };
+            if (dupRes.entry) {
               convos.setStep(senderKey, STEPS.CONFIRM, {
                 partyId: party.id, partyName: party.name, entryType: shortcut.type,
-                amount: shortcut.amount, description: '', entryDate: today, dup: true,
+                amount: shortcut.amount, description: '', entryDate: today, dup: true, preBalance: dupRes.balance,
               });
               console.log(`📩 caption shortcut in "${binding.name}": "${text.slice(0, 80)}" — duplicate suspected`);
               await sendText(remoteJid, dupPrompt(party.name, shortcut.type, shortcut.amount, today), msg);
             } else {
               convos.clear(senderKey);
               console.log(`📩 caption shortcut in "${binding.name}": "${text.slice(0, 80)}"`);
-              const res = await processBill(remoteJid, msg, shortcut, s.media ? s.media.buffer : null, s.media, undefined, undefined, client);
+              const res = await processBill(remoteJid, msg, shortcut, s.media ? s.media.buffer : null, s.media, undefined, undefined, client, undefined, dupRes.balance);
               trackLastEntry(senderKey, res);
             }
             continue;
@@ -1267,14 +1293,15 @@ async function startBot() {
             await sendText(remoteJid, '❌ Enter a valid date: type *today*, or a custom date (e.g. 28-09-2026 or 2026-09-28).', msg);
             continue;
           }
-          const dup = await findDuplicate(s.partyId, s.entryType, s.amount, entryDate);
-          if (dup) {
-            convos.setStep(senderKey, STEPS.CONFIRM, { entryDate, dup: true });
+          const dupRes = await findDuplicate(s.partyId, s.entryType, s.amount, entryDate);
+          if (dupRes.entry) {
+            convos.setStep(senderKey, STEPS.CONFIRM, { entryDate, dup: true, preBalance: dupRes.balance });
             console.log(`⚠️ duplicate suspected: ${s.partyName} ${s.amount} date=${entryDate}`);
             await sendText(remoteJid, dupPrompt(s.partyName, s.entryType, s.amount, entryDate), msg);
             continue;
           }
           s.entryDate = entryDate;
+          s.preBalance = dupRes.balance;
           await finalizeEntry(s);
           continue;
         }
