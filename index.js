@@ -19,8 +19,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { Boom } from '@hapi/boom';
-import { v2 as cloudinary } from 'cloudinary';
-import { randomBytes } from 'node:crypto';
+import { cloudinaryAccounts, createCloudinaryUploader } from './cloudinary-upload.js';
 import { parseCaption, formatRs, USAGE_TEXT } from './parser.js';
 import { createLedgerClient, createUserLedgerClient } from './ledger.js';
 import { parseActivateCommand, isBillCommand, parseBotCommand, parseMethodSelection, methodLabel } from './botcmd.js';
@@ -32,15 +31,29 @@ const PORT = process.env.PORT || 3000;
 const LEDGER_URL = (process.env.LEDGER_URL || 'https://market-ledger-vault.pages.dev').replace(/\/+$/, '');
 const LEDGER_PASSWORD = process.env.LEDGER_PASSWORD || '';
 
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || '',
-  api_key: process.env.CLOUDINARY_API_KEY || '',
-  api_secret: process.env.CLOUDINARY_API_SECRET || '',
-});
-
 if (!LEDGER_PASSWORD) console.warn('⚠️ LEDGER_PASSWORD not set — bot cannot talk to the ledger');
 
 const ledger = createLedgerClient({ baseUrl: LEDGER_URL, password: LEDGER_PASSWORD });
+
+// ─── Direct Cloudinary uploads (receipt PDFs) — multi-account failover ───
+// The portal picks its least-busy account; uploadMedia starts there and then
+// walks the bot's own env account list (cloudinary-upload.js) until one
+// accepts. The pick is best-effort: a 5s timeout + any failure just means
+// "start at account 1", so a slow/down portal never stalls a receipt save.
+async function pickCloudFromPortal(username) {
+  const t = await ledger.ensureToken();
+  const userQ = username ? `&user=${encodeURIComponent(username)}` : '';
+  const r = await fetch(`${LEDGER_URL}/api/cloudinary-pick?password=${encodeURIComponent(t)}${userQ}`, {
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!r.ok) return null; // 503 included — caller falls back to local order
+  const j = await r.json().catch(() => ({}));
+  return j.ok && j.cloud ? j.cloud : null;
+}
+const uploadMedia = createCloudinaryUploader({
+  accounts: cloudinaryAccounts(),
+  pickCloud: pickCloudFromPortal,
+}).uploadMedia;
 
 // ─── Group bindings: WhatsApp group JID -> customer ledger ───
 // A group is bound with `activate <user-id> <password>` (typed in the group).
@@ -151,7 +164,7 @@ app.get('/qr', async (req, res) => {
   res.json({ qr: qrDataUrl, connected: isConnected, groups: groupBindings.size });
 });
 
-app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, groups: groupBindings.size, version: '2.11.0' }));
+app.get('/health', (req, res) => res.json({ ok: true, connected: isConnected, groups: groupBindings.size, version: '2.12.0' }));
 
 // ─── Helpers ───
 function msgKeyId(key) { return `${key.remoteJid}:${key.id}`; }
@@ -249,21 +262,10 @@ async function runMediaJob(msg, mimetype, kind) {
   }
 }
 
-// Receipt attachments: the /api/receipts endpoint has no file field, so the bot
-// uploads the bill file to Cloudinary (folder market-ledger/) itself and appends
-// the URL to the receipt description. Works for images and PDFs.
-// Uploads are type 'authenticated' (not publicly readable) with a random
-// public_id — no party name or timestamp, so bill URLs can't be guessed.
-async function uploadMedia(buffer, mimetype) {
-  const dataUri = `data:${mimetype || 'application/octet-stream'};base64,${buffer.toString('base64')}`;
-  const up = await cloudinary.uploader.upload(dataUri, {
-    folder: 'market-ledger',
-    public_id: 's' + randomBytes(9).toString('hex'),
-    resource_type: 'auto',
-    type: 'authenticated',
-  });
-  return up.secure_url || '';
-}
+// Receipt attachments: the /api/receipts endpoint has no file field, so the
+// bot uploads the bill file to Cloudinary itself (uploadMedia — defined near
+// the top, multi-account failover in cloudinary-upload.js) and appends the
+// URL to the receipt description. Works for images and PDFs.
 
 // Pakistan date (YYYY-MM-DD) — Render runs on UTC, so don't use UTC date directly.
 function todayPK() {
@@ -532,7 +534,9 @@ async function processBill(groupJid, msg, parsed, buffer, media, description, en
       let photoUrl = '';
       if (hasMedia) {
         try {
-          photoUrl = await uploadMedia(buffer, mimetype);
+          // The group's bound username selects the customer's HOME account
+          // for the upload (portal pick); other accounts are failover only.
+          photoUrl = await uploadMedia(buffer, mimetype, { username: groupBindings.get(groupJid)?.username || null });
         } catch (e) {
           photoFailed = true;
           console.error('receipt file upload fail:', e.message);
